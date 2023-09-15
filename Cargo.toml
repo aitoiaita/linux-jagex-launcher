@@ -1,0 +1,12 @@
+[package]
+name = "osrs-launcher"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+oauth2 = "4.4.2"
+
+[patch.crates-io]
+oauth2 = { git = "https://github.com/aitoiaita/oauth2-rs.git" }
