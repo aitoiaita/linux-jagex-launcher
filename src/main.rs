@@ -235,7 +235,6 @@ impl Launcher {
     fn exchange_auth_code(&mut self, code: &AuthorizationCode) -> LauncherResult<()> {
         let token_response = self.jagex_client.exchange_code(code.clone()).request(http_client)?;
         self.jagex_resource.update_tokens(token_response)?;
-        self.launch()?;
         Ok(())
     }
 
