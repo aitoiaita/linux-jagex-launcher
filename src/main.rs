@@ -11,9 +11,9 @@ use oauth2::{
     Scope,
     TokenResponse,
     TokenUrl,
-    basic::{BasicClient, BasicErrorResponse, BasicRequestTokenError, BasicTokenResponse},
+    basic::{BasicClient, BasicErrorResponse, BasicTokenResponse, BasicRevocationErrorResponse},
     reqwest::http_client,
-    url::ParseError,
+    url::ParseError, DeviceCodeErrorResponse,
 };
 use serde::{Deserialize, Serialize};
 
@@ -60,9 +60,21 @@ impl From<serde_json::Error> for LauncherError {
     }
 }
 
-impl From<BasicRequestTokenError<oauth2::reqwest::Error<reqwest::Error>>> for LauncherError {
-    fn from(e: BasicRequestTokenError<oauth2::reqwest::Error<reqwest::Error>>) -> Self {
-        LauncherError::OAuth2(OAuth2Error::RequestToken(oauth2::RequestTokenError::Request(e)))
+impl From<RequestTokenError<oauth2::reqwest::Error<reqwest::Error>, BasicErrorResponse>> for LauncherError {
+    fn from(e: RequestTokenError<oauth2::reqwest::Error<reqwest::Error>, BasicErrorResponse>) -> Self {
+        LauncherError::OAuth2(OAuth2Error::RequestTokenBasic(e))
+    }
+}
+
+impl From<RequestTokenError<oauth2::reqwest::Error<reqwest::Error>, DeviceCodeErrorResponse>> for LauncherError {
+    fn from(e: RequestTokenError<oauth2::reqwest::Error<reqwest::Error>, DeviceCodeErrorResponse>) -> Self {
+        LauncherError::OAuth2(OAuth2Error::RequestTokenDevice(e))
+    }
+}
+
+impl From<RequestTokenError<oauth2::reqwest::Error<reqwest::Error>, BasicRevocationErrorResponse>> for LauncherError {
+    fn from(e: RequestTokenError<oauth2::reqwest::Error<reqwest::Error>, BasicRevocationErrorResponse>) -> Self {
+        LauncherError::OAuth2(OAuth2Error::RequestTokenRevocation(e))
     }
 }
 
@@ -78,14 +90,26 @@ impl Display for LauncherError {
 }
 
 enum OAuth2Error {
-    RequestToken(BasicRequestTokenError<RequestTokenError<oauth2::reqwest::Error<reqwest::Error>, BasicErrorResponse>>),
+    RequestTokenBasic(RequestTokenError<oauth2::reqwest::Error<reqwest::Error>, BasicErrorResponse>),
+    RequestTokenDevice(RequestTokenError<oauth2::reqwest::Error<reqwest::Error>, DeviceCodeErrorResponse>),
+    RequestTokenRevocation(RequestTokenError<oauth2::reqwest::Error<reqwest::Error>, BasicRevocationErrorResponse>),
     MissingRefreshToken
 }
 
 impl Display for OAuth2Error {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            OAuth2Error::RequestToken(e) => write!(f, "Couldn't request token exchange: {}", e),
+            OAuth2Error::RequestTokenBasic(e) => match e {
+                RequestTokenError::ServerResponse(er) => match serde_json::to_string(er) {
+                    Ok(json) => write!(f, "Server returned error response: {}", json),
+                    Err(_) => write!(f, "Server returned error response")
+                },
+                RequestTokenError::Request(e) => write!(f, "An error occured while sending the request: {}", e),
+                RequestTokenError::Parse(e, _) => write!(f, "An error occured while parsing the server response: {}", e),
+                RequestTokenError::Other(e) => write!(f, "An unexpected error occured. Server responded \"{}\"", e)
+            },
+            OAuth2Error::RequestTokenDevice(e) => write!(f, "The server responded with an error: {}", e),
+            OAuth2Error::RequestTokenRevocation(e) => write!(f, "The server responded with an error during a revocation request: {}", e),
             OAuth2Error::MissingRefreshToken => write!(f, "Missing refresh_token in auth response")
         }
     }
@@ -240,19 +264,19 @@ impl Launcher {
 
     fn launch(&mut self) -> LauncherResult<LauncherCommandResponse> {
         if let Some((access_token, refresh_token)) = self.jagex_resource.tokens()  {
+            println!("jagex access_token: {}", access_token.secret());
             let osrs_token_request = self.osrs_client.exchange_token(access_token.clone());
-            let osrs_token_response = osrs_token_request.request(http_client)
-                .unwrap_or_else(|e| panic!("Couldn't exchange launcher token for OSRS token: {}", e) );
+            let osrs_token_response= osrs_token_request.request(http_client)?;
         
             self.osrs_resource.update_tokens(osrs_token_response)?;
 
             if let Some((access_token, refresh_token)) = self.osrs_resource.tokens() {
                 println!("JX_ACCESS_TOKEN={}", access_token.secret());
                 println!("JX_REFRESH_TOKEN={}", refresh_token.secret());
-                run_runelite(access_token, refresh_token)?;
-                Ok(LauncherCommandResponse::Ok)
+                let child = run_runelite(access_token, refresh_token)?;
+                Ok(LauncherCommandResponse::Launched { child_id: child.id() } )
             } else {
-                Ok(LauncherCommandResponse::Error("Couldn't fetch OSRS access_token and refresh_token".to_string()))
+                Err(LauncherError::OAuth2(OAuth2Error::MissingRefreshToken))
             }
         } else {
             let auth_request = self.jagex_client.authorize_url(|| CsrfToken::new_random_len(12))
@@ -331,6 +355,7 @@ impl LauncherCommand {
 enum LauncherCommandResponse {
     Ok,
     Authenticate { url: String },
+    Launched {child_id: u32 },
     Error(String)
 }
 
@@ -349,6 +374,7 @@ impl LauncherCommandResponse {
         match self {
             LauncherCommandResponse::Ok => "Ok".to_string(),
             LauncherCommandResponse::Authenticate { url } => format!("Please visit the following URL: {}", url).to_string(),
+            LauncherCommandResponse::Launched { child_id } => format!("Launched client with ID {}", child_id),
             LauncherCommandResponse::Error(estr) => estr.to_string()
         }
     }
