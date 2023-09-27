@@ -1,12 +1,34 @@
 <html>
     <head>
         <script>
-            fetch('/jws', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },    
-                body: new URLSearchParams(window.location.hash.slice(1))
-            });
+            window.onload = async function() {
+                const response = await fetch('/jws', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },    
+                    body: new URLSearchParams(window.location.hash.slice(1))
+                });
+                const result = await response.json();
+                if(result['CharacterList'] != null) {
+                    console.log(JSON.stringify(result));
+                    for(var idx in result['CharacterList']) {
+                        var node = document.createElement("p");
+                        node.innerText = result['CharacterList'][idx];
+                        document.getElementById("account-list").appendChild(node);
+                    }
+                } else {
+                    document.body.innerHTML = "";
+                    document.body.style.textAlign = "left";
+                    document.body.style.whiteSpace = "pre";
+                    var node = document.createElement("p");
+                    node.innerText = JSON.stringify(result, null, 2);
+                    document.body.appendChild(node);
+                }
+                
+            }
         </script>
     </head>
-    <body>
+    <body style="text-align: center;color: white;background-color: black;">
+        <h1>Display names</h1>
+        <div id="account-list"></div>
+    </body>
 </html>

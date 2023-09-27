@@ -122,7 +122,7 @@ impl TryInto<ResponseBox> for DaemonResponse {
                 let header = Header::from_bytes("content-type", "text/html").unwrap(); // this will *not* panic :)
                 Ok(Response::from_string(s).with_header(header).boxed())
             },
-            DaemonResponse::ErrorStr(s) => Ok(Response::from_string(s).with_status_code(500).boxed()),
+            DaemonResponse::ErrorStr(_) => Ok(Response::from_string(serde_json::to_string(&self)?).with_status_code(500).boxed()),
             response => Ok(Response::from_string(serde_json::to_string(&response)?).boxed()),
         }
     }
@@ -527,7 +527,12 @@ impl Display for LauncherClientError {
         match self {
             LauncherClientError::NotInitialized => write!(f, "Launcher hasn't been initialized"),
             LauncherClientError::UnknownState => write!(f, "Unknown/untracked state"),
-            LauncherClientError::RequestToken(e) => write!(f, "Error requesting launcher access token: {}", e),
+            LauncherClientError::RequestToken(e) => write!(f, "Couldn't exchange authorization code for launcher tokens\n{}", match e {
+                RequestTokenError::ServerResponse(e) => format!("Server responded with error: {}", e),
+                RequestTokenError::Request(e) => format!("Couldn't send request: {}", e),
+                RequestTokenError::Parse(e, bytes) => format!("Couldn't parse server response: {}\n{}", e, String::from_utf8_lossy(bytes)),
+                RequestTokenError::Other(e) => e.to_string(),
+            }),
             LauncherClientError::TokenResponseMissingIDToken => write!(f, "Token exchange response was missing id_token"),
             LauncherClientError::TokenResponseMissingRefreshToken => write!(f, "Token exchange response was missing refresh_token"),
             LauncherClientError::AccessTokenNotInitialized => write!(f, "Access token not initialized"),
@@ -635,7 +640,12 @@ type OSRSClientResult<T> = Result<T, OSRSClientError>;
 impl Display for OSRSClientError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            OSRSClientError::RequestToken(e) => write!(f, "Error requesting OSRS access token: {}", e),
+            OSRSClientError::RequestToken(e) => write!(f, "Error requesting OSRS access token: {}", match e {
+                RequestTokenError::ServerResponse(e) => format!("Server responded with error: {}", e),
+                RequestTokenError::Request(e) => format!("Couldn't send request: {}", e),
+                RequestTokenError::Parse(e, bytes) => format!("Couldn't parse server response: {}\n{}", e, String::from_utf8_lossy(bytes)),
+                RequestTokenError::Other(e) => e.to_string(),
+            }),
             OSRSClientError::OAuthURL(e) => write!(f, "Couldn't parse oauth URL: {}", e),
             OSRSClientError::TokenResponseMissingRefreshToken => write!(f, "Token exchange response was missing refresh token"),
         }
