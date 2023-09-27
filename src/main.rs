@@ -1,451 +1,132 @@
-use interprocess::os::unix::udsocket::{UdStreamListener, UdStream};
-use oauth2::{
-    AccessToken,
-    AuthorizationCode,
-    AuthUrl,
-    ClientId,
-    ClientSecret,
-    CsrfToken,
-    RefreshToken,
-    RequestTokenError,
-    Scope,
-    TokenResponse,
-    TokenUrl,
-    basic::{BasicClient, BasicErrorResponse, BasicTokenResponse, BasicRevocationErrorResponse},
-    reqwest::http_client,
-    url::ParseError, DeviceCodeErrorResponse,
-};
-use serde::{Deserialize, Serialize};
+use std::net::{SocketAddr, SocketAddrV4, Ipv4Addr, Ipv6Addr, SocketAddrV6};
 
-use std::{collections::{
-    HashMap, hash_map::RandomState
-}, str::FromStr, process::{Command, Child}, time::{SystemTime, Duration}};
-use std::fmt::Display;
-use std::io::{Write, BufReader, BufRead, BufWriter};
+use daemon::{LauncherClientState, LauncherAuthorizationCode};
+use oauth2::{AuthorizationCode, CsrfToken};
+use reqwest::blocking::Response;
 
-const LAUNCHER_CLIENT_ID: &str = "com_jagex_auth_desktop_launcher";
-const LAUNCHER_AUTH_URL: &str = "https://account.jagex.com/oauth2/auth";
-const LAUNCHER_TOKEN_URL: &str = "https://account.jagex.com/oauth2/token";
+use crate::daemon::Daemon;
 
-const OSRS_CLIENT_ID: &str = "com_jagex_auth_desktop_osrs";
-const OSRS_CLIENT_SECRET: &str = "public";
-const OSRS_AUTH_URL: &str = "https://auth.jagex.com/shield/oauth/auth";
-const OSRS_TOKEN_URL: &str = "https://auth.jagex.com/shield/oauth/token";
+mod daemon;
+mod jagex_oauth;
+mod game_session;
 
-const UNIX_SOCKET_PATH: &str = "/tmp/tutisland";
+const LOCALHOST_V4: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 1);
+const LOCALHOST_V6: Ipv6Addr = Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1);
 
-enum LauncherError {
-    ParseURI(ParseJagexLauncherURIError),
-    ParseCommand(ParseCommandError),
-    IO(std::io::Error),
-    OAuth2(OAuth2Error)
+#[derive(Debug)]
+enum JagexURIForwarderError {
+    InvalidParams(String),
+    URIMissingCode,
+    URIMissingState,
+    URIMissingIntent,
+    InvalidIntent(String),
+    Reqwest(reqwest::Error),
 }
-type LauncherResult<T> = Result<T, LauncherError>;
+type JagexURIForwarderResult<T> = Result<T, JagexURIForwarderError>;
 
-impl From<ParseJagexLauncherURIError> for LauncherError {
-    fn from(e: ParseJagexLauncherURIError) -> Self {
-        LauncherError::ParseURI(e)
-    }
-}
-
-impl From<std::io::Error> for LauncherError {
-    fn from(e: std::io::Error) -> Self {
-        LauncherError::IO(e)
-    }
-}
-
-impl From<serde_json::Error> for LauncherError {
-    fn from(e: serde_json::Error) -> Self {
-        LauncherError::ParseCommand(ParseCommandError::JSON(e))
-    }
-}
-
-impl From<RequestTokenError<oauth2::reqwest::Error<reqwest::Error>, BasicErrorResponse>> for LauncherError {
-    fn from(e: RequestTokenError<oauth2::reqwest::Error<reqwest::Error>, BasicErrorResponse>) -> Self {
-        LauncherError::OAuth2(OAuth2Error::RequestTokenBasic(e))
-    }
-}
-
-impl From<RequestTokenError<oauth2::reqwest::Error<reqwest::Error>, DeviceCodeErrorResponse>> for LauncherError {
-    fn from(e: RequestTokenError<oauth2::reqwest::Error<reqwest::Error>, DeviceCodeErrorResponse>) -> Self {
-        LauncherError::OAuth2(OAuth2Error::RequestTokenDevice(e))
-    }
-}
-
-impl From<RequestTokenError<oauth2::reqwest::Error<reqwest::Error>, BasicRevocationErrorResponse>> for LauncherError {
-    fn from(e: RequestTokenError<oauth2::reqwest::Error<reqwest::Error>, BasicRevocationErrorResponse>) -> Self {
-        LauncherError::OAuth2(OAuth2Error::RequestTokenRevocation(e))
-    }
-}
-
-impl Display for LauncherError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            LauncherError::ParseURI(e) => write!(f, "Failed to parse URI - {}", e),
-            LauncherError::IO(e) => write!(f, "IO error - {}", e),
-            LauncherError::ParseCommand(e) => write!(f, "Failed to parse IPC command - {}", e),
-            LauncherError::OAuth2(e) => write!(f, "OAuth2 flow error - {}", e)
-        }
-    }
-}
-
-enum OAuth2Error {
-    RequestTokenBasic(RequestTokenError<oauth2::reqwest::Error<reqwest::Error>, BasicErrorResponse>),
-    RequestTokenDevice(RequestTokenError<oauth2::reqwest::Error<reqwest::Error>, DeviceCodeErrorResponse>),
-    RequestTokenRevocation(RequestTokenError<oauth2::reqwest::Error<reqwest::Error>, BasicRevocationErrorResponse>),
-    MissingRefreshToken
-}
-
-impl Display for OAuth2Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            OAuth2Error::RequestTokenBasic(e) => match e {
-                RequestTokenError::ServerResponse(er) => match serde_json::to_string(er) {
-                    Ok(json) => write!(f, "Server returned error response: {}", json),
-                    Err(_) => write!(f, "Server returned error response")
-                },
-                RequestTokenError::Request(e) => write!(f, "An error occured while sending the request: {}", e),
-                RequestTokenError::Parse(e, _) => write!(f, "An error occured while parsing the server response: {}", e),
-                RequestTokenError::Other(e) => write!(f, "An unexpected error occured. Server responded \"{}\"", e)
-            },
-            OAuth2Error::RequestTokenDevice(e) => write!(f, "The server responded with an error: {}", e),
-            OAuth2Error::RequestTokenRevocation(e) => write!(f, "The server responded with an error during a revocation request: {}", e),
-            OAuth2Error::MissingRefreshToken => write!(f, "Missing refresh_token in auth response")
-        }
-    }
-}
-
-enum ParseCommandError {
-    JSON(serde_json::Error)
-}
-
-impl Display for ParseCommandError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            ParseCommandError::JSON(e) => write!(f, "JSON parse error: {}", e)
-        }
-    }
-}
-
-enum ParseJagexLauncherURIError {
-    Protocol,
-    Component(String),
-    MissingCode,
-    MissingState,
-    MissingIntent,
-    Other(ParseError)
-}
-
-impl Display for ParseJagexLauncherURIError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ParseJagexLauncherURIError::Protocol => write!(f, "Missing or incorrect protocol"),
-            ParseJagexLauncherURIError::Component(s) => write!(f, "Malformed component: '{}'", s),
-            ParseJagexLauncherURIError::MissingCode => write!(f, "Missing 'code' component"),
-            ParseJagexLauncherURIError::MissingState => write!(f, "Missing 'state' component"),
-            ParseJagexLauncherURIError::MissingIntent => write!(f, "Missing 'intent' component"),
-            ParseJagexLauncherURIError::Other(e) => write!(f, "{}", e)
-        }
-    }
-}
-
-struct JagexLauncherURI {
-    code: AuthorizationCode,
-    state: String,
-    _intent: String
-}
-
-impl<'a> std::str::FromStr for JagexLauncherURI {
-    type Err = ParseJagexLauncherURIError;
-
-    fn from_str(str: &str) -> Result<Self, Self::Err> {
-        let uri_body = str.strip_prefix("jagex:")
-            .ok_or(ParseJagexLauncherURIError::Protocol)?;
-
-        let uri_component_list: Vec<(&str, &str)> = uri_body
-            .split(",")
-            .map(|c| c.split_once("=").ok_or_else(|| ParseJagexLauncherURIError::Component(c.to_string())) )
-            .collect::<Result<Vec<(&str, &str)>, ParseJagexLauncherURIError>>()?;
-        let uri_components: HashMap<&str, &str, RandomState> = HashMap::from_iter(uri_component_list);
-
-        let uri_code = uri_components.get("code")
-            .ok_or(ParseJagexLauncherURIError::MissingCode)
-            .map(|code| AuthorizationCode::new(code.to_string()) )?;
-        let uri_state = uri_components.get("state")
-            .ok_or(ParseJagexLauncherURIError::MissingState)?;
-        let uri_intent = uri_components.get("intent")
-            .ok_or(ParseJagexLauncherURIError::MissingIntent)?;
-
-        return Ok(JagexLauncherURI { 
-            code: uri_code,
-            state: uri_state.to_string(),
-            _intent: uri_intent.to_string()
-        });
-    }
-}
-
-fn handle_ipc_error(res: std::io::Result<UdStream>) -> Option<UdStream> {
-    match res {
-        Ok(val) => Some(val),
-        Err(err) => {
-            eprintln!("IPC error: {}", err);
-            None
-        }
-    }
-}
-
-struct LauncherResource {
-    access_token: Option<AccessToken>,
-    refresh_token: Option<RefreshToken>,
-    expiration: Option<SystemTime>
-}
-
-impl LauncherResource {
-    fn empty() -> Self {
-        LauncherResource { access_token: None, refresh_token: None, expiration: None }
-    }
-
-    fn update_tokens(&mut self, response: BasicTokenResponse) -> LauncherResult<()> {
-        self.access_token = Some(response.access_token().clone());
-        self.refresh_token = Some(response.refresh_token().ok_or(LauncherError::OAuth2(OAuth2Error::MissingRefreshToken))?.clone());
-        let expires_in = response.expires_in().unwrap_or(Duration::new(60 * 30, 0)); // assume 30 minute default expiration
-        self.expiration = Some(SystemTime::now() + expires_in);
-        Ok(())
-    }
-
-    fn tokens<'a>(&'a self) -> Option<(&'a AccessToken, &'a RefreshToken)> {
-        if let Some(access_token) = &self.access_token {
-            if let Some(refresh_token) = &self.refresh_token {
-                return Some((access_token, refresh_token));
-            }
-        }
-        None
-    }
-}
-
-struct Launcher {
-    osrs_client: BasicClient,
-    osrs_resource: LauncherResource,
-    jagex_client: BasicClient,
-    jagex_resource: LauncherResource
-}
-
-fn load_oauth_client(client_id: &str, client_secret: Option<&str>, auth_url: &str, token_url: Option<&str>) -> Result<BasicClient, ParseError> {
-    let client_id = ClientId::new(client_id.to_string());
-    let client_secret = match client_secret {
-        Some(url) => Some(ClientSecret::new(url.to_string())),
-        None => None
+fn handle_response(response: Response) {
+    let status = response.status();
+    let response_text = match response.text() {
+        Ok(t) => t,
+        Err(e) => panic!("HTTP Error: {}", e),
     };
-    let auth_url = AuthUrl::new(auth_url.to_string())?;
-    let token_url = match token_url {
-        Some(url) => Some(TokenUrl::new(url.to_string())?),
-        None => None
+    match status.as_u16() {
+        200..=299 => println!("Success: {}", response_text),
+        500..=599 => println!("Error: {}", response_text),
+        i => println!("{}: {}", i, response_text)
     };
-    let client = BasicClient::new(client_id, client_secret, auth_url, token_url);
-    Ok(client)
 }
 
-fn run_runelite(access_token: &AccessToken, refresh_token: &RefreshToken) -> LauncherResult<Child> {
-    return Ok(Command::new("runelite")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .env("JX_ACCESS_TOKEN", access_token.secret())
-        .env("JX_REFRESH_TOKEN", refresh_token.secret())
-        .spawn()?);
-}
+fn handle_jagex_uri(uri_arg_str: &str) -> JagexURIForwarderResult<()> {
+    let params: Vec<(&str, &str)> = uri_arg_str.split(",")
+        .map(|p| p.split_once("=").ok_or_else(||JagexURIForwarderError::InvalidParams(p.to_string())) )
+        .collect::<Result<_,_>>()?;
 
-impl Launcher {
-    fn exchange_auth_code(&mut self, code: &AuthorizationCode) -> LauncherResult<()> {
-        let token_response = self.jagex_client.exchange_code(code.clone()).request(http_client)?;
-        self.jagex_resource.update_tokens(token_response)?;
-        Ok(())
+    let auth_code_str = params.iter().find(|(k, _)| *k == "code" )
+        .ok_or(JagexURIForwarderError::URIMissingCode)?.1;
+    let state_str = params.iter().find(|(k, _)| *k == "state" )
+        .ok_or(JagexURIForwarderError::URIMissingState)?.1;
+    let intent = params.iter().find(|(k, _)| *k == "intent" )
+        .ok_or(JagexURIForwarderError::URIMissingIntent)?.1.to_string();
+    if intent != "social_auth" {
+        return Err(JagexURIForwarderError::InvalidIntent(intent));
     }
 
-    fn launch(&mut self) -> LauncherResult<LauncherCommandResponse> {
-        if let Some((access_token, refresh_token)) = self.jagex_resource.tokens()  {
-            println!("jagex access_token: {}", access_token.secret());
-            let osrs_token_request = self.osrs_client.exchange_token(access_token.clone());
-            let osrs_token_response= osrs_token_request.request(http_client)?;
-        
-            self.osrs_resource.update_tokens(osrs_token_response)?;
-
-            if let Some((access_token, refresh_token)) = self.osrs_resource.tokens() {
-                println!("JX_ACCESS_TOKEN={}", access_token.secret());
-                println!("JX_REFRESH_TOKEN={}", refresh_token.secret());
-                let child = run_runelite(access_token, refresh_token)?;
-                Ok(LauncherCommandResponse::Launched { child_id: child.id() } )
-            } else {
-                Err(LauncherError::OAuth2(OAuth2Error::MissingRefreshToken))
-            }
-        } else {
-            let auth_request = self.jagex_client.authorize_url(|| CsrfToken::new_random_len(12))
-                .add_scope(Scope::new("openid".to_string()))
-                .add_scope(Scope::new("offline".to_string()))
-                .add_scope(Scope::new("gamesso.token.create".to_string()))
-                .add_scope(Scope::new("user.profile.read".to_string()));
-            // TODO validate csrf token
-            let (url, _csrf_token) = auth_request.url();
-            Ok(LauncherCommandResponse::Authenticate { url: url.to_string() })
-        }
-    }
-
-    fn new() -> LauncherResult<Self> {
-        let jagex_client = load_oauth_client(LAUNCHER_CLIENT_ID, None, LAUNCHER_AUTH_URL, Some(LAUNCHER_TOKEN_URL))
-            .map_err(|e| LauncherError::ParseURI(ParseJagexLauncherURIError::Other(e)) )?;
-        let osrs_client = load_oauth_client(OSRS_CLIENT_ID, Some(OSRS_CLIENT_SECRET), OSRS_AUTH_URL, Some(OSRS_TOKEN_URL))
-            .map_err(|e| LauncherError::ParseURI(ParseJagexLauncherURIError::Other(e)) )?;
-        Ok(Launcher {
-            jagex_client,
-            jagex_resource: LauncherResource::empty(),
-            osrs_client,
-            osrs_resource: LauncherResource::empty()
-        })
-    }
-
-    fn run_loop(&mut self) -> LauncherResult<()> {
-        let listener = UdStreamListener::bind_with_drop_guard(UNIX_SOCKET_PATH)?;
-        for client in listener.incoming().filter_map(handle_ipc_error) {
-            // Read and parse a command
-            let mut reader = BufReader::new(client);
-            let mut command_buffer = String::new();
-            reader.read_line(&mut command_buffer)?;
-            let command: LauncherCommand = serde_json::from_str(&command_buffer)?;
-
-            // Run the command and generate a response
-            let mut response_buffer = serde_json::to_string(&command.run(self))?;
-            response_buffer.push('\n');
-
-            // Write the response and clean up
-            let mut client = reader.into_inner();
-            client.write_all(response_buffer.as_bytes())?;
-            client.shutdown(std::net::Shutdown::Both)?;
-        }
-        Ok(())
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-enum LauncherCommand {
-    Launch,
-    AuthCode { auth_code: AuthorizationCode }
-}
-
-impl LauncherCommand {
-    fn run(&self, launcher: &mut Launcher) -> LauncherCommandResponse {
-        match self {
-            LauncherCommand::AuthCode { auth_code } => {
-                let token_req = launcher.exchange_auth_code(auth_code);
-                match token_req {
-                    Ok(_) => LauncherCommandResponse::Ok,
-                    Err(e) => LauncherCommandResponse::Error(e.to_string())
-                }
-            },
-            LauncherCommand::Launch => {
-                match launcher.launch() {
-                    Ok(r) => r,
-                    Err(e) => LauncherCommandResponse::Error(e.to_string())
-                }
-            }
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-enum LauncherCommandResponse {
-    Ok,
-    Authenticate { url: String },
-    Launched {child_id: u32 },
-    Error(String)
-}
-
-impl LauncherCommandResponse {
-    fn error<'a>(&'a self) -> Option<&'a str> {
-        if let LauncherCommandResponse::Error(error_string) = self {
-            Some(&error_string)
-        } else {
-            None
-        }
-    }
-}
-
-impl LauncherCommandResponse {
-    fn summary(&self) -> String {
-        match self {
-            LauncherCommandResponse::Ok => "Ok".to_string(),
-            LauncherCommandResponse::Authenticate { url } => format!("Please visit the following URL: {}", url).to_string(),
-            LauncherCommandResponse::Launched { child_id } => format!("Launched client with ID {}", child_id),
-            LauncherCommandResponse::Error(estr) => estr.to_string()
-        }
-    }
-}
-
-struct Client;
-
-impl Client {
-    fn connect_ipc() -> LauncherResult<UdStream> {
-        return Ok(UdStream::connect(UNIX_SOCKET_PATH)?);
-    }
-
-    fn send_command(command: &LauncherCommand) -> LauncherResult<LauncherCommandResponse> {
-        let ipc_socket = Client::connect_ipc()?;
-        let mut serialized_command = serde_json::to_string(command)?;
-        serialized_command.push('\n');
-
-        let mut writer = BufWriter::new(ipc_socket);
-        writer.write_all(serialized_command.as_bytes())?;
-
-        let ipc_socket = writer.into_inner().unwrap();
-        let mut reader = BufReader::new(ipc_socket);
-        let mut response_buffer = String::new();
-        reader.read_line(&mut response_buffer)?;
-        Ok(serde_json::from_str(&response_buffer)?)
-    }
-
-    fn launch() -> LauncherResult<LauncherCommandResponse> {
-        Client::send_command(&LauncherCommand::Launch)
-    }
-
-    fn handle_jagex_uri(uri_str: &str) -> LauncherResult<LauncherCommandResponse> {
-        let uri = JagexLauncherURI::from_str(uri_str)?;
-        Client::send_command(&LauncherCommand::AuthCode { auth_code: uri.code })
-    }
-}
-
-fn ipc_socket_exists() -> bool {
-    match std::fs::metadata(UNIX_SOCKET_PATH) {
-        Ok(_) => true,
-        Err(_) => false
-    }
-}
-
-// TODO:
-//  > refresh expired tokens automatically
-//  > multiple account support
-fn main() -> std::io::Result<()> {
-    let program_args: Vec<String> = std::env::args().collect();
-    if let Some(uri_str) = program_args.get(1) {
-        let response = Client::handle_jagex_uri(uri_str)
-            .unwrap_or_else(|e| panic!("Error handling URI: {}", e) );
-        response.error().map(|e| panic!("Error from server while handling URI: {}", e) );
-        let response = Client::launch()
-            .unwrap_or_else(|e| panic!("Error sending launch request: {}", e) ) ;
-        response.error().map(|e| panic!("Error from server while sending launch request: {}", e) );
-        return Ok(());
-    } else {
-        if ipc_socket_exists() {
-            println!("Sending launch request to daemon");
-            let response = Client::launch()
-                .unwrap_or_else(|e| panic!("Error sending launch request: {}", e) );
-            println!("{}", response.summary());
-        } else {
-            println!("Running daemon");
-            let mut launcher = Launcher::new()
-                .unwrap_or_else(|e| panic!("Error creating launcher daemon: {}", e) );
-            launcher.run_loop()
-                .unwrap_or_else(|e| panic!("Error running launcher daemon: {}", e) );
-        }
-    }
-
+    let code: LauncherAuthorizationCode = AuthorizationCode::new(auth_code_str.to_string()).into();
+    let state: LauncherClientState = CsrfToken::new(state_str.to_string()).into();
+    let http_client = reqwest::blocking::Client::new();
+    let daemon_request = daemon::DaemonRequestType::AuthorizationCode { code, state, intent };
+    let request = daemon_request.to_reqwest_request("http://localhost:80", &http_client).map_err(JagexURIForwarderError::Reqwest)?;
+    let response = http_client.execute(request).map_err(JagexURIForwarderError::Reqwest)?;
+    handle_response(response);
     Ok(())
+}
+
+#[derive(Debug)]
+enum LaunchError {
+    Reqwest(reqwest::Error),
+}
+type LaunchResult<T> = Result<T, LaunchError>;
+
+fn launch(display_name: Option<&str>) -> LaunchResult<Response> {
+    let http_client = reqwest::blocking::Client::new();
+    let daemon_request = daemon::DaemonRequestType::Launch { display_name: display_name.map(|dn| dn.to_string() ) };
+    let request = daemon_request.to_reqwest_request("http://localhost:80", &http_client).map_err(LaunchError::Reqwest)?;
+    let response = http_client.execute(request).map_err(LaunchError::Reqwest)?;
+    Ok(response)
+}
+
+fn handle_character_select(display_name: &str) -> LaunchResult<()> {
+    handle_response(launch(Some(display_name))?);
+    Ok(())
+}
+
+fn handle_ambiguous_launch() -> LaunchResult<()> {
+    handle_response(launch(None)?);
+    Ok(())
+}
+
+// Syntax: osrs-launcher --run-daemon [port] | jagex:<params> | [character display name]
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    match args.get(1).map(String::as_str) {
+        Some("--run-daemon") => {
+
+            let port = match args.get(2) {
+                Some(p) => match u16::from_str_radix(p, 10) {
+                    Ok(p) => p,
+                    Err(e) => panic!("Couldn't parse port argument: {}", e),
+                },
+                None => 80
+            };
+            let listen_saddrs = vec![
+                SocketAddr::V4(SocketAddrV4::new(LOCALHOST_V4, port)),
+                SocketAddr::V6(SocketAddrV6::new(LOCALHOST_V6, port, 0, 0))
+            ];
+            println!("Running daemon HTTP server on 127.0.0.1:{}", port);
+            let listen_address = tiny_http::ConfigListenAddr::IP(listen_saddrs);
+            let mut daemon = match Daemon::new(listen_address) {
+                Ok(d) => d,
+                Err(e) => panic!("Couldn't create daemon: {}", e),
+            };
+            match daemon.run() {
+                Ok(()) => (),
+                Err(e) => panic!("Error running daemon: {}\nStopping", e),
+            }
+        }
+        Some(arg) => {
+            if let Some(uri_args) = arg.strip_prefix("jagex:") {
+                if let Err(error) = handle_jagex_uri(uri_args) {
+                    panic!("Error while handling Jagex URI\n{:?}", error);
+                }
+            } else {
+                if let Err(error) = handle_character_select(arg) {
+                    panic!("Error while launching client as character with display name \"{}\"\n{:?}", arg, error)
+                }
+            }
+        },
+        None => if let Err(error) = handle_ambiguous_launch() {
+            panic!("Error launching client:\n{:?}", error);
+        }
+    };
 }

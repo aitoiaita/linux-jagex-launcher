@@ -1,0 +1,12 @@
+<html>
+    <head>
+        <script>
+            fetch('/jws', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },    
+                body: new URLSearchParams(window.location.hash.slice(1))
+            });
+        </script>
+    </head>
+    <body>
+</html>
