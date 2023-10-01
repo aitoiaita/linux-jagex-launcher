@@ -1,34 +1,94 @@
 <html>
     <head>
         <script>
-            window.onload = async function() {
-                const response = await fetch('/jws', {
+			async function post_launch(display_name) {
+                const response = fetch('/launch', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },    
+                    body: new URLSearchParams({"display_name": display_name})
+                }).then(a => { a.json().then(b => { alert("Launched PID " + b['Launched']) }) });
+			}
+
+            async function set_character_list(list) {
+                for(var idx in list) {
+					var name = list[idx];
+                    var pnode = document.createElement("p");
+					var anode = document.createElement("a");
+                    anode.innerText = name;
+					anode.setAttribute("href", "javascript:post_launch(\"" + name + "\");");
+                    pnode.appendChild(anode);
+                    document.getElementById("account-list").appendChild(pnode);
+                    document.getElementById("account-list-container").style.display = "block";
+                }
+            }
+
+            async function post_jws() {
+                fetch('/jws', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },    
                     body: new URLSearchParams(window.location.hash.slice(1))
-                });
-                const result = await response.json();
-                if(result['CharacterList'] != null) {
-                    console.log(JSON.stringify(result));
-                    for(var idx in result['CharacterList']) {
-                        var node = document.createElement("p");
-                        node.innerText = result['CharacterList'][idx];
-                        document.getElementById("account-list").appendChild(node);
+                }).then(r => {
+                    if(r.status == 200) {
+                        r.json().then(jsobj => {
+                            set_character_list(jsobj['CharacterList']);
+                        });
+                    } else {
+                        display_error(r.status + " from jws endpoint");
                     }
-                } else {
-                    document.body.innerHTML = "";
-                    document.body.style.textAlign = "left";
-                    document.body.style.whiteSpace = "pre";
-                    var node = document.createElement("p");
-                    node.innerText = JSON.stringify(result, null, 2);
-                    document.body.appendChild(node);
-                }
-                
+                });
             }
+
+            async function redir_auth_url(deauth=false) {
+                fetch('/authorize', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: new URLSearchParams({
+                        'deauth': (deauth ? 1 : 0)
+                    })
+                }).then(r => {
+                    r.json().then(obj => {
+                        console.log(obj);
+                        window.location.replace(obj['AuthorizeUrl']);
+                    })
+                });
+            }
+
+            async function get_character_list() {
+                return fetch('/characters');
+            }
+
+            async function display_error(e) {
+                document.body.innerHTML = "";
+                document.body.style.textAlign = "left";
+                document.body.style.whiteSpace = "pre";
+                var node = document.createElement("p");
+                node.innerText = JSON.stringify(result, null, 2);
+                document.body.appendChild(node);
+            }
+
+            async function window_onload() {
+                if(window.location.hash.length > 1) {
+                    post_jws();
+                } else {
+                    get_character_list().then(r => {
+                        if(r.status == 200) {
+                            r.json().then(jsobj => {
+                                set_character_list(jsobj['CharacterList']);
+                            });
+                        } else {
+                            redir_auth_url();
+                        }
+                    });
+                }
+            }
+
+            window.onload = window_onload()
         </script>
     </head>
     <body style="text-align: center;color: white;background-color: black;">
-        <h1>Display names</h1>
-        <div id="account-list"></div>
+        <div id="account-list-container" style="display: none">
+            <h1>Display names</h1>
+            <div id="account-list"></div>
+        </div>
     </body>
 </html>
