@@ -13,16 +13,10 @@ const LAUNCHER_CLIENT_ID: &str = "com_jagex_auth_desktop_launcher";
 const LAUNCHER_AUTH_URL: &str = "https://account.jagex.com/oauth2/auth";
 const LAUNCHER_TOKEN_URL: &str = "https://account.jagex.com/oauth2/token";
 
-const OSRS_CLIENT_ID: &str = "com_jagex_auth_desktop_osrs";
-const OSRS_CLIENT_SECRET: &str = "public";
-const OSRS_AUTH_URL: &str = "https://auth.jagex.com/shield/oauth/auth";
-const OSRS_TOKEN_URL: &str = "https://auth.jagex.com/shield/oauth/token";
-
 const CONSENT_CLIENT_ID: &str = "1fddee4e-b100-4f4e-b2b0-097f9088f9d2";
 
 #[derive(Debug)]
 pub enum DaemonError {
-    OSRSClient(OSRSClientError),
     HTTPServer(Box<dyn Error + Send + Sync + 'static>),
     HTTPServerClosed,
     Request(DaemonRequestError),
@@ -33,7 +27,6 @@ pub type DaemonResult<T> = Result<T, DaemonError>;
 impl Display for DaemonError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DaemonError::OSRSClient(e) => write!(f, "[OSRS Client] {}", e),
             DaemonError::HTTPServer(e) => write!(f, "HTTP server error: {}", e),
             DaemonError::HTTPServerClosed => write!(f, "HTTP server was closed while listening"),
             DaemonError::Request(e) => write!(f, "{}", e),
@@ -94,12 +87,11 @@ trans_tuple_struct!(DaemonSessionID(String));
 pub struct Daemon {
     listen_address: ConfigListenAddr,
     launcher_client: LauncherClient,
-    osrs_client: OSRSClient,
     consent_client: ConsentClient,
     account_session: Option<AccountSession>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub enum DaemonResponse {
     Launched(u32),
     ReadyToLaunch,
@@ -110,6 +102,7 @@ pub enum DaemonResponse {
     CharacterList(Vec<String>),
     UnknownCharacter(String),
     RawHtml(String),
+    Status(DaemonStatus, u32), // DaemonStatus, pid
     ErrorStr(String),
 }
 
@@ -134,13 +127,15 @@ impl From<DaemonRequestError> for DaemonResponse {
     }
 }
 
-pub enum DaemonRequestType {
+#[derive(Debug)]
+pub enum DaemonRequest {
     Launch { display_name: Option<String> },
     ForwardJS,
     AuthorizationURLRequest{ deauth: bool },
     AuthorizationCode{ code: LauncherAuthorizationCode, state: LauncherClientState, intent: String },
     JagexJWS{ code: AuthorizationCode, id_token: LauncherIDToken, state: String  },
     ListCharacters,
+    Status,
 }
 
 #[derive(Debug)]
@@ -152,7 +147,6 @@ pub enum DaemonRequestError {
     JWTParse(JWTParseError),
     SerializeResponse(serde_json::Error),
     LauncherClient(LauncherClientError),
-    OSRSClient(OSRSClientError),
     GameSession(GameSessionError),
     SetRSAccountDisplayName,
     NeedAuthorizationToRun,
@@ -176,7 +170,6 @@ macro_rules! from_error_wrapper {
 
 from_error_wrapper!(std::io::Error, DaemonRequestError, DaemonRequestError::IO);
 from_error_wrapper!(LauncherClientError, DaemonRequestError, DaemonRequestError::LauncherClient);
-from_error_wrapper!(OSRSClientError, DaemonRequestError, DaemonRequestError::OSRSClient);
 from_error_wrapper!(GameSessionError, DaemonRequestError, DaemonRequestError::GameSession);
 
 impl Display for DaemonRequestError {
@@ -189,7 +182,6 @@ impl Display for DaemonRequestError {
             Self::JWTParse(e) => write!(f, "Couldn't parse JWT/id_token - {}", e),
             Self::SerializeResponse(e) => write!(f, "Couldn't serialize response - {}", e),
             Self::LauncherClient(e) => write!(f, "Launcher OAuth client error - {}", e),
-            Self::OSRSClient(e) => write!(f, "OSRS OAuth client error - {}", e),
             Self::GameSession(e) => write!(f, "Game session client error - {}", e),
             Self::SetRSAccountDisplayName => write!(f, "Couldn't select a character by display name on a non-jagex account"),
             Self::NeedAuthorizationToRun => write!(f, "Couldnt run client without completing the authorization flow"),
@@ -232,9 +224,17 @@ fn run_runelite_with_jagex_account(display_name: &DisplayName, session_id: &Sess
         .spawn()?);
 }
 
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+pub enum DaemonStatus {
+    NeedAuthorization,
+    Launch(Vec<String>),
+    AwaitAuthorization(String),
+    AwaitConsent(String),
+}
+
 #[derive(Clone)]
 enum OSRSLoginProvider { Jagex, Runescape }
-impl DaemonRequestType {
+impl DaemonRequest {
     const FORWARD_JS_CONTENT: &'static str = include_str!("forwarder.html");
 
     fn run(&self, daemon: &mut Daemon) -> DaemonRequestResult<DaemonResponse> {
@@ -266,8 +266,8 @@ impl DaemonRequestType {
                     },
                     Some(AccountSession::Runescape { profile }) => {
                         let osrs_tokens = daemon.launcher_client.tokens()?;
-                        let display_name = profile.display_name.as_ref().ok_or(DaemonRequestError::RSAccountDisplayNameNotSet)?;
-                        let child = run_runelite_with_rs_account(Some(display_name.as_str()), &osrs_tokens.0, &osrs_tokens.1)?;
+                        let display_name = profile.display_name.as_ref().map(|s| s.as_str() );
+                        let child = run_runelite_with_rs_account(display_name, &osrs_tokens.0, &osrs_tokens.1)?;
                         Ok(DaemonResponse::Launched(child.id()))
                     },
                     None => Err(DaemonRequestError::NeedAuthorizationToRun),
@@ -282,19 +282,17 @@ impl DaemonRequestType {
                 Ok(DaemonResponse::AuthorizeUrl(url))
             },
             Self::AuthorizationCode { code, state, intent } => {
-                let (access_token, id_token) = daemon.launcher_client.authorize(code.clone(), state.clone(), intent.clone())
+                let (_, id_token) = daemon.launcher_client.authorize(code.clone(), state.clone(), intent.clone())
                     .map(|(at, it, _)| (at.clone(), it.clone()))?;
                 match daemon.launcher_client.login_provider {
                     Some(OSRSLoginProvider::Jagex) => Ok(DaemonResponse::ConsentUrl(daemon.consent_client.register_auth_url())),
                     Some(OSRSLoginProvider::Runescape) => {
-                        let osrs_tokens = daemon.osrs_client.exchange_jagex_client_access_token(&access_token)?;
                         let profile = game_session::fetch_game_profile(&id_token)?;
                         let display_name = profile.display_name.as_ref().ok_or(DaemonRequestError::RSAccountDisplayNameNotSet)?.clone();
                         daemon.account_session = Some(AccountSession::Runescape { profile });
-                        let child = run_runelite_with_rs_account(Some(display_name.as_str()), &osrs_tokens.0, &osrs_tokens.1)?;
-                        return Ok(DaemonResponse::Launched(child.id()));
+                        Ok(DaemonResponse::CharacterList(vec![display_name]))
                     },
-                    None => todo!()
+                    None => Err(DaemonRequestError::NeedAuthorizationToRun),
                 }
             },
             Self::JagexJWS { code: _, id_token, state } => {
@@ -304,11 +302,10 @@ impl DaemonRequestType {
                 let (sess_id, accounts) = game_session::fetch_game_session(id_token)?;
 
                 daemon.account_session = Some(AccountSession::Jagex { session_id: sess_id, accounts });
-                if let Some(AccountSession::Jagex { session_id, accounts }) = &daemon.account_session {
+                if let Some(AccountSession::Jagex { session_id: _, accounts }) = &daemon.account_session {
                     if accounts.len() == 1 {
                         let account = accounts.get(0).unwrap();
-                        let child = run_runelite_with_jagex_account(&account.display_name, &session_id, &account.account_id)?;
-                        Ok(DaemonResponse::Launched(child.id()))
+                        Ok(DaemonResponse::CharacterList(vec![account.display_name.0.to_string()]))
                     } else {
                         let character_names = accounts.iter().map(|a| a.display_name.0.clone() );
                         Ok(DaemonResponse::CharacterList(character_names.collect()))
@@ -330,53 +327,58 @@ impl DaemonRequestType {
                     None => Err(DaemonRequestError::NeedAuthorizationToRun),
                 }
             },
+            Self::Status => {
+                Ok(DaemonResponse::Status(daemon.status(), std::process::id()))
+            }
         }
     }
 
     fn http_method(&self) -> tiny_http::Method {
         match self {
-            DaemonRequestType::Launch { display_name: _ } => Method::Post,
-            DaemonRequestType::ForwardJS => Method::Get,
-            DaemonRequestType::AuthorizationURLRequest { deauth: _ } => Method::Post,
-            DaemonRequestType::AuthorizationCode { code: _, state: _, intent: _ } => Method::Post,
-            DaemonRequestType::JagexJWS { code: _, id_token: _, state: _ } => Method::Post,
-            DaemonRequestType::ListCharacters => Method::Get,
+            DaemonRequest::Launch { display_name: _ } => Method::Post,
+            DaemonRequest::ForwardJS => Method::Get,
+            DaemonRequest::AuthorizationURLRequest { deauth: _ } => Method::Post,
+            DaemonRequest::AuthorizationCode { code: _, state: _, intent: _ } => Method::Post,
+            DaemonRequest::JagexJWS { code: _, id_token: _, state: _ } => Method::Post,
+            DaemonRequest::ListCharacters => Method::Get,
+            DaemonRequest::Status => Method::Get,
         }
     }
 
     fn http_path(&self) -> &'static str {
         match self {
-            DaemonRequestType::Launch { display_name: _ } => "/launch",
-            DaemonRequestType::ForwardJS => "/",
-            DaemonRequestType::AuthorizationURLRequest { deauth: _ } => "/authorize",
-            DaemonRequestType::AuthorizationCode { code: _, state: _, intent: _ } => "/authcode",
-            DaemonRequestType::JagexJWS { code: _, id_token: _, state: _ } => "/jws",
-            DaemonRequestType::ListCharacters => "/characters",
+            DaemonRequest::Launch { display_name: _ } => "/launch",
+            DaemonRequest::ForwardJS => "/",
+            DaemonRequest::AuthorizationURLRequest { deauth: _ } => "/authorize",
+            DaemonRequest::AuthorizationCode { code: _, state: _, intent: _ } => "/authcode",
+            DaemonRequest::JagexJWS { code: _, id_token: _, state: _ } => "/jws",
+            DaemonRequest::ListCharacters => "/characters",
+            DaemonRequest::Status => "/status",
         }
     }
 
     fn http_post_body(&self) -> Option<String> {
         let mut params: HashMap<&str, &str> = HashMap::new();
         match self {
-            DaemonRequestType::Launch { display_name } => {
+            DaemonRequest::Launch { display_name } => {
                 if let Some(name) = display_name {
                     params.insert("display_name", name);
                 }
             },
-            DaemonRequestType::AuthorizationURLRequest { deauth } => {
+            DaemonRequest::AuthorizationURLRequest { deauth } => {
                 params.insert("deauth", match deauth { true => "1", false => "0" });
             },
-            DaemonRequestType::AuthorizationCode { code, state, intent } => {
+            DaemonRequest::AuthorizationCode { code, state, intent } => {
                 params.insert("code", code.0.secret());
                 params.insert("state", state.0.secret());
                 params.insert("intent", intent);
             },
-            DaemonRequestType::JagexJWS { code, id_token, state } => {
+            DaemonRequest::JagexJWS { code, id_token, state } => {
                 params.insert("code", code.secret());
                 params.insert("id_token", &id_token.0.original);
                 params.insert("state", state);
             },
-            DaemonRequestType::ListCharacters | DaemonRequestType::ForwardJS => return None,
+            DaemonRequest::ListCharacters | DaemonRequest::ForwardJS | DaemonRequest::Status => return None,
         };
         let encoded = params.into_iter()
             .map(|(key, value)| {
@@ -430,6 +432,7 @@ impl DaemonRequestType {
                 Ok(Self::JagexJWS { code, id_token, state })
             },
             (Method::Get, "/characters") => Ok(Self::ListCharacters),
+            (Method::Get, "/status") => Ok(Self::Status),
             (_, elsestr) => Err(DaemonRequestError::UnknownPath(elsestr.to_string())),
         }
     }
@@ -468,35 +471,58 @@ fn display_error_response<TS: Display>(ts: TS) -> ResponseBox {
 impl Daemon {
     pub fn new(listen_address: ConfigListenAddr) -> DaemonResult<Self> {
         let launcher_client = LauncherClient::new()?;
-        let osrs_client = OSRSClient::new().map_err(DaemonError::OSRSClient)?;
         let consent_client = ConsentClient::new()
             .map_err(|e| DaemonError::OAuthParse(e) )?;
         Ok(Daemon {
             listen_address,
             launcher_client,
-            osrs_client,
             consent_client,
             account_session: None,
         })
     }
 
-    pub fn run(&mut self) -> DaemonResult<()> {
+    fn status(&self) -> DaemonStatus {
+        match &self.account_session {
+            Some(AccountSession::Jagex { session_id: _, accounts }) => 
+                DaemonStatus::Launch(accounts.iter().map(|a| a.display_name.0.to_string() ).collect()),
+            Some(AccountSession::Runescape { profile: RSProfileResponse { display_name: Some(display_name), .. } }) =>
+                DaemonStatus::Launch(vec![display_name.to_string()]),
+            Some(AccountSession::Runescape { profile: RSProfileResponse { display_name: None, .. } }) =>
+                DaemonStatus::Launch(vec![]),
+            None => {
+                if let Some(url) = &self.consent_client.auth_url {
+                    DaemonStatus::AwaitConsent(url.to_string())
+                } else if let Some(url) = &self.launcher_client.auth_url {
+                    DaemonStatus::AwaitAuthorization(url.to_string())
+                } else {
+                    DaemonStatus::NeedAuthorization
+                }
+            },
+        }
+    }
+
+    pub fn run(&mut self) -> DaemonError {
         let server_config = tiny_http::ServerConfig {
             addr: self.listen_address.clone(),
             ssl: None,
         };
         // start listening
-        let http_server = tiny_http::Server::new(server_config)
-            .map_err(|e| DaemonError::HTTPServer(e) )?;
+        let http_server = match tiny_http::Server::new(server_config)
+            .map_err(|e| DaemonError::HTTPServer(e) ) {
+                Ok(s) => s,
+                Err(e) => return e
+            };
         // runs until server is closed
-        http_server.incoming_requests()
-            .filter(is_request_local)
-            .try_for_each(|r| self.handle_request(r) )?;
-        return Err(DaemonError::HTTPServerClosed);
+        if let Err(e) = http_server.incoming_requests()
+                .filter(is_request_local)
+                .try_for_each(|r| self.handle_request(r) ) {
+            return DaemonError::Request(e);
+        }
+        return DaemonError::HTTPServerClosed;
     }
 
     fn handle_request(&mut self, mut request: Request) -> Result<(), DaemonRequestError> {
-        let daemon_request = match DaemonRequestType::from_tiny_http_request(&mut request) {
+        let daemon_request = match DaemonRequest::from_tiny_http_request(&mut request) {
             Ok(req) => req,
             Err(e) => {
                 eprintln!("Error reading request: {}", e);
@@ -542,8 +568,8 @@ impl Display for LauncherClientError {
     }
 }
 
-trans_tuple_struct!(pub LauncherAuthorizationCode(AuthorizationCode), derive(Clone));
-trans_tuple_struct!(pub LauncherClientState(CsrfToken), derive(Clone));
+trans_tuple_struct!(pub LauncherAuthorizationCode(AuthorizationCode), derive(Clone, Debug));
+trans_tuple_struct!(pub LauncherClientState(CsrfToken), derive(Clone, Debug));
 trans_tuple_struct!(LauncherAccessToken(AccessToken), derive(Clone));
 trans_tuple_struct!(pub LauncherIDToken(IDToken), derive(Clone, Debug, Serialize, Deserialize));
 trans_tuple_struct!(LauncherRefreshToken(RefreshToken));
@@ -553,7 +579,8 @@ pub struct LauncherClient {
     access_token: Option<LauncherAccessToken>,
     id_token: Option<LauncherIDToken>,
     refresh_token: Option<LauncherRefreshToken>,
-    login_provider: Option<OSRSLoginProvider>
+    login_provider: Option<OSRSLoginProvider>,
+    auth_url: Option<Url>,
 }
 
 fn load_oauth_client(client_id: &str, client_secret: Option<&str>, auth_url: &str, token_url: Option<&str>) -> Result<JagexClient, ParseError> {
@@ -577,6 +604,7 @@ impl LauncherClient {
             state: None,
             access_token: None, id_token: None, refresh_token: None,
             login_provider: None,
+            auth_url: None,
         })
     }
 
@@ -623,63 +651,10 @@ impl LauncherClient {
             .add_scope(Scope::new("gamesso.token.create".to_string()))
             .add_scope(Scope::new("user.profile.read".to_string()));
         let (url, csrf_token) = auth_request.url();
+        let url_str = url.to_string();
+        self.auth_url = Some(url);
         self.state = Some(csrf_token.into());
-        return url.to_string();
-    }
-}
-
-#[derive(Debug)]
-pub enum OSRSClientError {
-    RequestToken(RequestTokenError<oauth2::reqwest::Error<reqwest::Error>, StandardErrorResponse<BasicErrorResponseType>>),
-    OAuthURL(url::ParseError),
-    TokenResponseMissingRefreshToken,
-
-}
-type OSRSClientResult<T> = Result<T, OSRSClientError>;
-
-impl Display for OSRSClientError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            OSRSClientError::RequestToken(e) => write!(f, "Error requesting OSRS access token: {}", match e {
-                RequestTokenError::ServerResponse(e) => format!("Server responded with error: {}", e),
-                RequestTokenError::Request(e) => format!("Couldn't send request: {}", e),
-                RequestTokenError::Parse(e, bytes) => format!("Couldn't parse server response: {}\n{}", e, String::from_utf8_lossy(bytes)),
-                RequestTokenError::Other(e) => e.to_string(),
-            }),
-            OSRSClientError::OAuthURL(e) => write!(f, "Couldn't parse oauth URL: {}", e),
-            OSRSClientError::TokenResponseMissingRefreshToken => write!(f, "Token exchange response was missing refresh token"),
-        }
-    }
-}
-
-trans_tuple_struct!(OSRSAccessToken(AccessToken));
-trans_tuple_struct!(OSRSRefreshToken(RefreshToken));
-pub struct OSRSClient {
-    oauth: JagexClient,
-    access_token: Option<OSRSAccessToken>,
-    refresh_token: Option<OSRSRefreshToken>,
-}
-
-impl OSRSClient {
-    fn new() -> OSRSClientResult<Self> {
-        let oauth = load_oauth_client(OSRS_CLIENT_ID, Some(OSRS_CLIENT_SECRET), OSRS_AUTH_URL, Some(OSRS_TOKEN_URL))
-            .map_err(|e| OSRSClientError::OAuthURL(e))?;
-        Ok(OSRSClient {
-            oauth,
-            access_token: None, refresh_token: None,
-        })
-    }
-
-    fn exchange_jagex_client_access_token<'a>(&'a mut self, access_token: &LauncherAccessToken) -> OSRSClientResult<(&'a OSRSAccessToken, &'a OSRSRefreshToken)> {
-        let response = self.oauth.exchange_token(access_token.0.clone()).request(http_client)
-            .map_err(OSRSClientError::RequestToken)?;
-        let osrs_access_token = response.access_token().clone();
-        let osrs_refresh_token = response.refresh_token()
-            .ok_or(OSRSClientError::TokenResponseMissingRefreshToken)?.clone();
-
-        self.access_token = Some(osrs_access_token.into());
-        self.refresh_token = Some(osrs_refresh_token.into());
-        Ok((self.access_token.as_ref().unwrap(), self.refresh_token.as_ref().unwrap()))
+        return url_str;
     }
 }
 
@@ -687,12 +662,13 @@ trans_tuple_struct!(ConsentState(CsrfToken));
 pub struct ConsentClient {
     oauth: JagexClient,
     state: Option<ConsentState>,
+    auth_url: Option<Url>,
 }
 
 impl ConsentClient {
     fn new() -> Result<ConsentClient, ParseError> {
         let oauth = load_oauth_client(CONSENT_CLIENT_ID, None, LAUNCHER_AUTH_URL, Some(LAUNCHER_TOKEN_URL))?;
-        Ok(ConsentClient { oauth, state: None })
+        Ok(ConsentClient { oauth, state: None, auth_url: None })
     }
 
     fn register_auth_url(&mut self) -> String {
@@ -709,8 +685,9 @@ impl ConsentClient {
             .add_extra_param("nonce", nonce)
             .set_redirect_uri(std::borrow::Cow::Owned(RedirectUrl::new("http://localhost".to_string()).unwrap()))
             .url();
+        self.auth_url = Some(url);
         self.state = Some(token.into());
-        return url.to_string();
+        return self.auth_url.as_ref().unwrap().to_string();
     }
 
     fn valid_state(&self, s: &str) -> bool {
