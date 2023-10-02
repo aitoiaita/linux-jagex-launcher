@@ -4,7 +4,7 @@ use fork::Fork;
 use oauth2::{AuthorizationCode, CsrfToken};
 use url::Url;
 
-use crate::{daemon::{DaemonRequest, DaemonResponse, DaemonStatus, Daemon}, xdg, LOCALHOST_V4, LOCALHOST_V6};
+use crate::{daemon::{DaemonRequest, DaemonResponse, DaemonStatus, Daemon, DaemonError}, xdg, LOCALHOST_V4, LOCALHOST_V6};
 
 #[derive(Debug)]
 pub enum ClientAuthorizeError {
@@ -139,7 +139,7 @@ impl Client {
                 ];
                 let listen_address = tiny_http::ConfigListenAddr::IP(listen_saddrs);
                 match Daemon::new(listen_address) {
-                    Ok(mut d) => panic!("Daemon encountered error and stopped:\n{}", d.run()),
+                    Ok(mut d) => panic!("Daemon encountered error and stopped:\n{}", d.run().map(|_| DaemonError::HTTPServerClosed ).unwrap_or_else(|e| e )),
                     Err(e) => panic!("Couldn't create daemon: {}", e),
                 }
             },

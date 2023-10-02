@@ -1,13 +1,13 @@
-use std::{error::Error, fmt::Display, net::IpAddr, collections::{hash_map::RandomState, HashMap}, hash::BuildHasher, str::FromStr, process::{Child, Command}};
+use std::{error::Error, fmt::Display, net::IpAddr, collections::{hash_map::RandomState, HashMap}, hash::BuildHasher, str::FromStr, process::{Child, Command}, time::{SystemTime, Duration}};
 
-use oauth2::{AuthorizationCode, ClientId, ClientSecret, TokenUrl, AuthUrl, basic::BasicErrorResponseType, CsrfToken, Scope, AccessToken, RefreshToken, reqwest::http_client, RequestTokenError, StandardErrorResponse, TokenResponse, ResponseType, RedirectUrl};
+use oauth2::{AuthorizationCode, ClientId, ClientSecret, TokenUrl, AuthUrl, basic::{BasicErrorResponseType, BasicTokenType}, CsrfToken, Scope, AccessToken, RefreshToken, reqwest::http_client, RequestTokenError, StandardErrorResponse, TokenResponse, ResponseType, RedirectUrl, EmptyExtraTokenFields};
 use rand::{thread_rng, Rng};
 use reqwest::header::{HeaderValue, CONTENT_TYPE};
 use serde::{Serialize, Deserialize};
-use tiny_http::{ConfigListenAddr, Request, Method, ResponseBox, Response, Header};
+use tiny_http::{ConfigListenAddr, Request, Method, ResponseBox, Response, Header, Server};
 use url::{Url, ParseError};
 
-use crate::{jagex_oauth::{IDToken, JagexClient, JWTParseError}, game_session::{GameSessionError, SessionID, AccountID, DisplayName, self, RSProfileResponse}, LOCALHOST_V4, LOCALHOST_V6};
+use crate::{jagex_oauth::{IDToken, JagexClient, JWTParseError, TokenResponseWithJWT}, game_session::{GameSessionError, SessionID, AccountID, DisplayName, self, RSProfileResponse}, LOCALHOST_V4, LOCALHOST_V6};
 
 const LAUNCHER_CLIENT_ID: &str = "com_jagex_auth_desktop_launcher";
 const LAUNCHER_AUTH_URL: &str = "https://account.jagex.com/oauth2/auth";
@@ -21,6 +21,7 @@ pub enum DaemonError {
     HTTPServerClosed,
     Request(DaemonRequestError),
     OAuthParse(ParseError),
+    Recv(std::io::Error),
 }
 pub type DaemonResult<T> = Result<T, DaemonError>;
 
@@ -31,6 +32,7 @@ impl Display for DaemonError {
             DaemonError::HTTPServerClosed => write!(f, "HTTP server was closed while listening"),
             DaemonError::Request(e) => write!(f, "{}", e),
             DaemonError::OAuthParse(e) => write!(f, "Couldn't create OAuth client: {}", e),
+            DaemonError::Recv(e) => write!(f, "Couldn't receive daemon request: {}", e),
         }
     }
 }
@@ -501,24 +503,31 @@ impl Daemon {
         }
     }
 
-    pub fn run(&mut self) -> DaemonError {
+    fn handle_queued_requests(&mut self, http_server: &Server) -> DaemonResult<()> {
+        loop {
+            match http_server.try_recv() {
+                Ok(Some(request)) => if is_request_local(&request) { self.handle_request(request)? },
+                Err(e) => return Err(DaemonError::Recv(e)), // Server closed, etc.
+                Ok(None) => break Ok(()), // None left in queue
+            };
+        }
+    }
+
+    const LOOP_DELAY_MS: u64 = 100;
+    pub fn run(&mut self) -> DaemonResult<()> {
         let server_config = tiny_http::ServerConfig {
             addr: self.listen_address.clone(),
             ssl: None,
         };
         // start listening
-        let http_server = match tiny_http::Server::new(server_config)
-            .map_err(|e| DaemonError::HTTPServer(e) ) {
-                Ok(s) => s,
-                Err(e) => return e
-            };
-        // runs until server is closed
-        if let Err(e) = http_server.incoming_requests()
-                .filter(is_request_local)
-                .try_for_each(|r| self.handle_request(r) ) {
-            return DaemonError::Request(e);
+        let http_server = tiny_http::Server::new(server_config)
+            .map_err(|e| DaemonError::HTTPServer(e) )?;
+        loop {
+            // exhaust request queue
+            self.handle_queued_requests(&http_server)?;
+            self.check_and_refresh_tokens()?;
+            std::thread::sleep(Duration::from_millis(Daemon::LOOP_DELAY_MS));
         }
-        return DaemonError::HTTPServerClosed;
     }
 
     fn handle_request(&mut self, mut request: Request) -> Result<(), DaemonRequestError> {
@@ -534,6 +543,15 @@ impl Daemon {
         let response: ResponseBox = daemon_response.try_into()
             .map_err(|e| DaemonRequestError::SerializeResponse(e) )?;
         request.respond(response).map_err(|e| DaemonRequestError::IO(e) )
+    }
+
+    fn check_and_refresh_tokens(&mut self) -> DaemonResult<()> {
+        if self.launcher_client.expired() {
+            println!("Launcher tokens expired - refreshing");
+            self.launcher_client.refresh()
+                .map_err(|e| DaemonError::Request(DaemonRequestError::LauncherClient(e)))?;
+        }
+        Ok(())
     }
 }
 
@@ -581,6 +599,7 @@ pub struct LauncherClient {
     refresh_token: Option<LauncherRefreshToken>,
     login_provider: Option<OSRSLoginProvider>,
     auth_url: Option<Url>,
+    expires_at: Option<SystemTime>,
 }
 
 fn load_oauth_client(client_id: &str, client_secret: Option<&str>, auth_url: &str, token_url: Option<&str>) -> Result<JagexClient, ParseError> {
@@ -605,6 +624,7 @@ impl LauncherClient {
             access_token: None, id_token: None, refresh_token: None,
             login_provider: None,
             auth_url: None,
+            expires_at: None,
         })
     }
 
@@ -615,16 +635,7 @@ impl LauncherClient {
         Ok((at, rt, it))
     }
 
-    fn authorize<'a>(&'a mut self, code: LauncherAuthorizationCode, state: LauncherClientState, _intent: String) -> LauncherClientResult<(&'a LauncherAccessToken, &'a LauncherIDToken, &'a LauncherRefreshToken)> {
-        let stored_state = self.state.as_ref().ok_or(LauncherClientError::NotInitialized)?;
-        if stored_state.secret() != state.secret() {
-            return Err(LauncherClientError::UnknownState);
-        }
-
-        let request = self.oauth.exchange_code(code.0);
-        let response = request.request(http_client)
-            .map_err(|e| LauncherClientError::RequestToken(e) )?;
-
+    fn handle_token_response<'a>(&'a mut self, response: TokenResponseWithJWT<EmptyExtraTokenFields, BasicTokenType>) -> LauncherClientResult<(&'a LauncherAccessToken, &'a LauncherIDToken, &'a LauncherRefreshToken)> {
         let access_token = response.access_token();
         let id_token = response.id_token()
             .ok_or(LauncherClientError::TokenResponseMissingIDToken)?.clone();
@@ -641,7 +652,42 @@ impl LauncherClient {
         self.access_token = Some(access_token.clone().into());
         self.id_token = Some(id_token.into());
         self.refresh_token = Some(refresh_token.into());
+        self.expires_at = response.expires_in().map(|d| SystemTime::now() + d );
+
         Ok((self.access_token.as_ref().unwrap(), self.id_token.as_ref().unwrap(), self.refresh_token.as_ref().unwrap()))
+    }
+
+    fn authorize<'a>(&'a mut self, code: LauncherAuthorizationCode, state: LauncherClientState, _intent: String) -> LauncherClientResult<(&'a LauncherAccessToken, &'a LauncherIDToken, &'a LauncherRefreshToken)> {
+        // return error not initialized if state hasn't been set. return error if unexpected state.
+        let stored_state = self.state.as_ref().ok_or(LauncherClientError::NotInitialized)?;
+        if stored_state.secret() != state.secret() {
+            return Err(LauncherClientError::UnknownState);
+        }
+
+        let request = self.oauth.exchange_code(code.0);
+        let response = request.request(http_client)
+            .map_err(|e| LauncherClientError::RequestToken(e) )?;
+
+        self.handle_token_response(response)
+    }
+
+    fn refresh<'a>(&'a mut self) -> LauncherClientResult<(&'a LauncherAccessToken, &'a LauncherIDToken, &'a LauncherRefreshToken)> {
+        let request = self.refresh_token.as_ref()
+            .ok_or(LauncherClientError::RefreshTokenNotInitialized)
+            .map(|rt| self.oauth.exchange_refresh_token(&rt.0) )?;
+        let response = request.request(http_client)
+            .map_err(LauncherClientError::RequestToken)?;
+
+        self.handle_token_response(response)
+    }
+
+    fn expired(&self) -> bool {
+        if let Some(expires_at) = self.expires_at {
+            if SystemTime::now() > expires_at {
+                return true;
+            }
+        }
+        return false;
     }
 
     fn register_auth_url(&mut self) -> String {
