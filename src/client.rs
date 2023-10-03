@@ -64,7 +64,7 @@ impl Client {
         Ok(daemon_response)
     }
 
-    pub fn authorize(&self, uri_arg_str: &str) -> ClientResult<()> {
+    pub fn authorize(&self, uri_arg_str: &str) -> ClientResult<DaemonResponse> {
         let params: Vec<(&str, &str)> = uri_arg_str.split(",")
             .map(|p| p.split_once("="))
             .filter(|po| po.is_some() ).map(|po| po.unwrap() )
@@ -85,8 +85,8 @@ impl Client {
             state: CsrfToken::new(state_str.to_string()).into(),
             intent,
         };
-        let _ = self.execute_request(&daemon_request)?;
-        Ok(())
+        let response = self.execute_request(&daemon_request)?;
+        Ok(response)
     }
 
     fn launch_and_print_result(&self, display_name: Option<&str>) {
@@ -147,14 +147,22 @@ impl Client {
         }
     }
 
+    const DAEMON_INIT_POLL_DELAY: u64 = 250;
     pub fn ensure_daemon_running(&self) -> ClientResult<(DaemonStatus, u32)> {
+        let mut tried_spawn = false;
         let mut last_status = None;
         while last_status.is_none() {
             last_status = match self.daemon_status() {
                 Ok(s) => Some(s),
                 Err(ClientError::ExecuteRequest(e)) if e.is_connect() => {
-                    println!("Spawning daemon process");
-                    self.spawn_detached_daemon()?;
+                    if !tried_spawn {
+                        println!("Spawning daemon process");
+                        self.spawn_detached_daemon()?;
+                        tried_spawn = true;
+                    } else {
+                        println!("Waiting for daemon...");
+                    }
+                    std::thread::sleep(Duration::from_millis(Self::DAEMON_INIT_POLL_DELAY));
                     None
                 }
                 Err(e) => return Err(e),
