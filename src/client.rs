@@ -1,4 +1,4 @@
-use std::{fmt::Display, net::{SocketAddrV4, SocketAddr, SocketAddrV6}, time::Duration};
+use std::{fmt::Display, net::{SocketAddrV4, SocketAddr, SocketAddrV6}, time::Duration, io::{stdout, Write}};
 
 use fork::Fork;
 use oauth2::{AuthorizationCode, CsrfToken};
@@ -195,7 +195,7 @@ impl Client {
                 for (display_name, idx) in choices.iter().zip(1..) {
                     println!(" {}) {}", idx, display_name);
                 }
-                print!("Select a character to launch\n >");
+                print!("Select a character to launch\n >"); stdout().flush().unwrap();
                 let mut line_buf = String::new();
                 // if the line was read
                 if std::io::stdin().read_line(&mut line_buf).is_ok() {
