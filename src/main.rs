@@ -2,7 +2,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 
 use clap::Parser;
 use client::{Client, ClientResult};
-use daemon::DaemonStatus;
+use daemon::{DaemonStatus, LauncherClientSession, ConsentClientSession};
 use sysinfo::{System, SystemExt, Pid, ProcessExt};
 
 mod daemon;
@@ -23,6 +23,9 @@ struct ProgramArguments {
 
     #[arg(short, long, default_value_t=false)]
     kill_daemon: bool,
+
+    #[arg(short, long, default_value_t=false)]
+    clear_creds: bool,
 }
 
 fn kill_process(pid: usize) -> bool {
@@ -43,17 +46,38 @@ fn main() -> ClientResult<()> {
             .map(|s| u16::from_str_radix(&s, 10) )
             .unwrap_or(Ok(DEFAULT_DAEMON_PORT))
             .expect("Invalid port in env var");
+        if port != DEFAULT_DAEMON_PORT {
+            println!("Using daemon port {}", port);
+        }
         // create client and authorize if the daemon is waiting for authorization
         let client = Client::new(port);
         match client.daemon_status() {
-            Ok((DaemonStatus::AwaitAuthorization(_), _)) => { client.authorize(&jagex_params)?; },
-            _ => eprintln!("Daemon wasn't awaiting authorization"),
+            Ok((DaemonStatus::AwaitAuthorization(_), _)) => { 
+                let response = client.authorize(&jagex_params)?;
+                println!("{:?}", response);
+             },
+            Ok(_) => eprintln!("Daemon wasn't awaiting authorization"),
+            Err(e) => eprintln!("Couldn't fetch daemon status: {}", e),
         }
     } else {
         let args = ProgramArguments::parse();
         let client = Client::new(args.daemon_port);
 
-        if args.kill_daemon {
+        if args.clear_creds {
+            if let Ok(path) = LauncherClientSession::ensure_state_file_path() {
+                if path.exists() {
+                    std::fs::remove_file(path).expect("Couldn't remove launcher client credentials file");
+                    println!("Cleared launcher client credentials");
+                }
+            }
+            if let Ok(path) = ConsentClientSession::ensure_state_file_path() {
+                if path.exists() {
+                    std::fs::remove_file(path).expect("Couldn't remove consent client credentials file");
+                    println!("Cleared consent client credentials");
+                }
+            }
+            println!("Done clearing credentials");
+        } else if args.kill_daemon {
             // kill the daemon
             if let Ok((_, pid)) = client.daemon_status() {
                 match kill_process(pid.try_into().unwrap()) {
