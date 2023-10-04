@@ -2,6 +2,7 @@ use std::{fmt::Display, net::{SocketAddrV4, SocketAddr, SocketAddrV6}, time::Dur
 
 use fork::Fork;
 use oauth2::{AuthorizationCode, CsrfToken};
+use sysinfo::{SystemExt, System, Pid, ProcessExt, Process, PidExt, ProcessStatus};
 use url::Url;
 
 use crate::{daemon::{DaemonRequest, DaemonResponse, DaemonStatus, Daemon, DaemonError}, xdg, LOCALHOST_V4, LOCALHOST_V6};
@@ -20,7 +21,8 @@ pub enum ClientError {
     ErrorResponse(DaemonRequest, String),
     ForkError(i32),
     AuthURIMissingCode, AuthURIMissingState, AuthURIMissingIntent,
-    AuthURIIntentInvalid(String)
+    AuthURIIntentInvalid(String),
+    DaemonCrashed,
 }
 pub type ClientResult<T> = Result<T, ClientError>;
 
@@ -37,6 +39,7 @@ impl Display for ClientError {
             ClientError::AuthURIMissingState => write!(f, "Authorization URI was missing state param"),
             ClientError::AuthURIMissingIntent => write!(f, "Authorization URI was missing intent param"),
             ClientError::AuthURIIntentInvalid(s) => write!(f, "Authorization URI intent param was an invalid value: {}", s),
+            ClientError::DaemonCrashed => write!(f, "Spawned daemon, but then it crashed. Check daemon logs."), // << TODO: daemon logs
         }
     }
 }
@@ -45,6 +48,20 @@ pub struct Client {
     pub daemon_port: u16,
     http_client: reqwest::blocking::Client,
     url_base: String,
+}
+
+fn is_process_running_child_daemon(process: &Process) -> bool {
+    let self_pid = std::process::id();
+    let is_child_proc = process.parent()
+        .map(|parent_id | parent_id.as_u32() == self_pid )
+        .unwrap_or(false);
+    if is_child_proc {
+        return match process.status() {
+            ProcessStatus::Zombie => false, // dead child :(
+            _ => true,
+        };
+    }
+    return false;
 }
 
 impl Client {
@@ -147,20 +164,31 @@ impl Client {
         }
     }
 
-    const DAEMON_INIT_POLL_DELAY: u64 = 250;
+    const DAEMON_INIT_POLL_DELAY: u64 = 500;
     pub fn ensure_daemon_running(&self) -> ClientResult<(DaemonStatus, u32)> {
-        let mut tried_spawn = false;
+        let mut system = System::new();
+        let mut spawned_pid = None;
         let mut last_status = None;
         while last_status.is_none() {
             last_status = match self.daemon_status() {
                 Ok(s) => Some(s),
                 Err(ClientError::ExecuteRequest(e)) if e.is_connect() => {
-                    if !tried_spawn {
-                        println!("Spawning daemon process");
-                        self.spawn_detached_daemon()?;
-                        tried_spawn = true;
+                    if let Some(pid) = spawned_pid {
+                        system.refresh_process(pid);
+                        let dproc_query = system.process(pid);
+                        if let Some(daemon_process) = dproc_query {
+                            if is_process_running_child_daemon(&daemon_process) {
+                                println!("Waiting for daemon...");
+                            } else {
+                                return Err(ClientError::DaemonCrashed);
+                            }
+                        } else {
+                            return Err(ClientError::DaemonCrashed);
+                        } 
                     } else {
-                        println!("Waiting for daemon...");
+                        println!("Spawning daemon process");
+                        let daemon_pid = usize::try_from(self.spawn_detached_daemon()?).unwrap();
+                        spawned_pid = Some(Pid::from(daemon_pid));
                     }
                     std::thread::sleep(Duration::from_millis(Self::DAEMON_INIT_POLL_DELAY));
                     None

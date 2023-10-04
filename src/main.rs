@@ -79,18 +79,21 @@ fn main() -> ClientResult<()> {
             println!("Done clearing credentials");
         } else if args.kill_daemon {
             // kill the daemon
-            if let Ok((_, pid)) = client.daemon_status() {
-                match kill_process(pid.try_into().unwrap()) {
+            match client.daemon_status() {
+                Ok((_, pid)) => match kill_process(pid.try_into().unwrap()) {
                     true => println!("Killed process with PID {}", pid),
                     false => eprintln!("Couldn't find/kill process with PID {}", pid),
-                }
-            } else {
-                eprintln!("Couldn't kill daemon; did not respond to status request.\nAre you sure it's an osrs-launcher daemon?");
+                },
+                Err(e) => eprintln!("Couldn't get daemon status: {}\nAre you sure it's an osrs-launcher daemon?", e),
             }
         } else {
             // make sure the daemon is running and run the client
-            client.ensure_daemon_running()?;
-            client.run()?;
+            if let Err(e) = client.ensure_daemon_running() {
+                panic!("Couldn't ensure daemon was running\n{}", e);
+            }
+            if let Err(e) = client.run() {
+                panic!("{}", e);
+            }
         }
     }
 
