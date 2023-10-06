@@ -7,7 +7,7 @@ use serde::{Serialize, Deserialize};
 use tiny_http::{ConfigListenAddr, Request, Method, ResponseBox, Response, Header, Server};
 use url::{Url, ParseError};
 
-use crate::{jagex_oauth::{IDToken, JagexClient, JWTParseError, TokenResponseWithJWT}, game_session::{GameSessionError, SessionID, AccountID, DisplayName, self, RSProfileResponse, GameSession, AccountSession, GameSessionClient}, LOCALHOST_V4, LOCALHOST_V6, xdg::{self, XDGDirectoryError}};
+use crate::{jagex_oauth::{IDToken, JagexClient, JWTParseError, TokenResponseWithJWT}, game_session::{GameSessionError, SessionID, AccountID, DisplayName, self, RSProfileResponse, GameSession, AccountSession, GameSessionClient}, LOCALHOST_V4, LOCALHOST_V6, xdg::{self, XDGDirectoryError, XDGDirectoryResult}};
 
 const LAUNCHER_CLIENT_ID: &str = "com_jagex_auth_desktop_launcher";
 const LAUNCHER_AUTH_URL: &str = "https://account.jagex.com/oauth2/auth";
@@ -16,6 +16,11 @@ const LAUNCHER_TOKEN_URL: &str = "https://account.jagex.com/oauth2/token";
 const CONSENT_CLIENT_ID: &str = "1fddee4e-b100-4f4e-b2b0-097f9088f9d2";
 
 pub const DAEMON_STATE_SUBDIR: &str = "osrs-launcher";
+
+
+pub fn ensure_log_dir() -> XDGDirectoryResult<PathBuf> {
+    xdg::ensure_state_home_exists(DAEMON_STATE_SUBDIR).map(|p| p.join("logs"))
+}
 
 #[derive(Debug)]
 pub enum DaemonError {
@@ -524,7 +529,7 @@ impl Daemon {
         let daemon_request = match DaemonRequest::from_tiny_http_request(&mut request) {
             Ok(req) => req,
             Err(e) => {
-                eprintln!("Error reading request: {}", e);
+                tracing::warn!("Error reading request: {}", e);
                 return Ok(request.respond(display_error_response(e))?)
             }
         };
@@ -766,7 +771,7 @@ impl LauncherClient {
         };
         let tokens = tokens.clone();
         if tokens.expired() {
-            println!("refreshed expired tokens");
+            tracing::info!("refreshed expired tokens");
             self.session.set_saved_tokens(tokens.refreshed(&self.oauth)?)
         } else {
             Ok(self.session.tokens.as_ref().unwrap())

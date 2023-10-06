@@ -4,6 +4,7 @@ use clap::Parser;
 use client::{Client, ClientResult};
 use daemon::{DaemonStatus, LauncherClientSession, ConsentClientSession};
 use sysinfo::{System, SystemExt, Pid, ProcessExt};
+use tracing_subscriber::fmt::writer::MakeWriterExt;
 
 mod daemon;
 mod jagex_oauth;
@@ -38,6 +39,10 @@ fn kill_process(pid: usize) -> bool {
 }
 
 fn main() -> ClientResult<()> {
+    // setup logging
+    let logfile = tracing_appender::rolling::daily(daemon::ensure_log_dir().unwrap(), "client");
+    tracing_subscriber::fmt().with_writer(logfile.and(std::io::stdout)).with_level(true).init();
+
     if let Some(jagex_params) = std::env::args().nth(1).and_then(|s| s.strip_prefix("jagex:").map(|s| s.to_string() ) ) {
         // handle authorization callback invokation
 
@@ -47,17 +52,17 @@ fn main() -> ClientResult<()> {
             .unwrap_or(Ok(DEFAULT_DAEMON_PORT))
             .expect("Invalid port in env var");
         if port != DEFAULT_DAEMON_PORT {
-            println!("Using daemon port {}", port);
+            tracing::info!("Sending authorization code to daemon port {}", port);
         }
         // create client and authorize if the daemon is waiting for authorization
         let client = Client::new(port);
         match client.daemon_status() {
             Ok((DaemonStatus::AwaitAuthorization(_), _)) => { 
                 let response = client.authorize(&jagex_params)?;
-                println!("{:?}", response);
+                tracing::debug!("Authorization response: {:?}", response);
              },
-            Ok(_) => eprintln!("Daemon wasn't awaiting authorization"),
-            Err(e) => eprintln!("Couldn't fetch daemon status: {}", e),
+            Ok(_) => tracing::warn!("Daemon wasn't awaiting authorization"),
+            Err(e) => tracing::error!("Couldn't fetch daemon status: {}", e),
         }
     } else {
         let args = ProgramArguments::parse();
@@ -67,32 +72,32 @@ fn main() -> ClientResult<()> {
             if let Ok(path) = LauncherClientSession::ensure_state_file_path() {
                 if path.exists() {
                     std::fs::remove_file(path).expect("Couldn't remove launcher client credentials file");
-                    println!("Cleared launcher client credentials");
+                    tracing::info!("Cleared launcher client credentials");
                 }
             }
             if let Ok(path) = ConsentClientSession::ensure_state_file_path() {
                 if path.exists() {
                     std::fs::remove_file(path).expect("Couldn't remove consent client credentials file");
-                    println!("Cleared consent client credentials");
+                    tracing::info!("Cleared consent client credentials");
                 }
             }
-            println!("Done clearing credentials");
+            tracing::info!("Done clearing credentials");
         } else if args.kill_daemon {
             // kill the daemon
             match client.daemon_status() {
                 Ok((_, pid)) => match kill_process(pid.try_into().unwrap()) {
-                    true => println!("Killed process with PID {}", pid),
-                    false => eprintln!("Couldn't find/kill process with PID {}", pid),
+                    true => tracing::info!("Killed process with PID {}", pid),
+                    false => tracing::warn!("Couldn't find/kill process with PID {}", pid),
                 },
-                Err(e) => eprintln!("Couldn't get daemon status: {}\nAre you sure it's an osrs-launcher daemon?", e),
+                Err(e) => tracing::warn!("Couldn't get daemon status: {}\nAre you sure it's an osrs-launcher daemon?", e),
             }
         } else {
             // make sure the daemon is running and run the client
             if let Err(e) = client.ensure_daemon_running() {
-                panic!("Couldn't ensure daemon was running\n{}", e);
+                tracing::error!("Couldn't ensure daemon was running\n{}", e);
             }
             if let Err(e) = client.run() {
-                panic!("{}", e);
+                tracing::error!("{}", e);
             }
         }
     }

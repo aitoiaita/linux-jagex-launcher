@@ -5,7 +5,7 @@ use oauth2::{AuthorizationCode, CsrfToken};
 use sysinfo::{SystemExt, System, Pid, ProcessExt, Process, PidExt, ProcessStatus};
 use url::Url;
 
-use crate::{daemon::{DaemonRequest, DaemonResponse, DaemonStatus, Daemon, DaemonError}, xdg, LOCALHOST_V4, LOCALHOST_V6};
+use crate::{daemon::{DaemonRequest, DaemonResponse, DaemonStatus, Daemon, DaemonError, self}, xdg, LOCALHOST_V4, LOCALHOST_V6};
 
 #[derive(Debug)]
 pub enum ClientAuthorizeError {
@@ -111,14 +111,14 @@ impl Client {
         let response = match self.execute_request(&daemon_request) {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("{}", e);
+                tracing::warn!("Couldn't launch: {}", e);
                 return;
             },
         };
         match response {
-            DaemonResponse::Launched(pid)  => println!("Launched game with PID {}", pid),
-            DaemonResponse::ErrorStr(s) => eprintln!("Couldn't launch game due to error: {}", s),
-            r => eprintln!("Received unexpected response to launch request: {:?}", r),
+            DaemonResponse::Launched(pid)  => tracing::info!("Launched game with PID {}", pid),
+            DaemonResponse::ErrorStr(s) => tracing::warn!("Couldn't launch game due to error: {}", s),
+            r => tracing::warn!("Received unexpected response to launch request: {:?}", r),
         };
     }
 
@@ -126,7 +126,7 @@ impl Client {
         let open_result: Result<std::process::Child, String> = Url::parse(&url_str).map_err(|e| e.to_string() )
             .and_then(|url| xdg::open_http_url(url).map_err(|e| e.to_string() ) );
         if let Err(e) = open_result {
-            eprintln!("Couldn't open url: {}", e);
+            tracing::warn!("Couldn't open url: {}", e);
         }
     }
 
@@ -144,21 +144,36 @@ impl Client {
         match fork::fork() {
             Ok(Fork::Parent(pid)) => Ok(pid),
             Ok(Fork::Child) => {
-                if let Err(i) = fork::setsid() {
-                    panic!("Couldn't setsid in daemon; returned {}", i);
-                }
-                if let Err(i) = fork::close_fd() {
-                    eprintln!("Can't close stdio fds in daemon; returned {}", i)
-                }
-                let listen_saddrs = vec![
-                    SocketAddr::V4(SocketAddrV4::new(LOCALHOST_V4, self.daemon_port)),
-                    SocketAddr::V6(SocketAddrV6::new(LOCALHOST_V6, self.daemon_port, 0, 0))
-                ];
-                let listen_address = tiny_http::ConfigListenAddr::IP(listen_saddrs);
-                match Daemon::new(listen_address) {
-                    Ok(mut d) => panic!("Daemon encountered error and stopped:\n{}", d.run().map(|_| DaemonError::HTTPServerClosed ).unwrap_or_else(|e| e )),
-                    Err(e) => panic!("Couldn't create daemon: {}", e),
-                }
+                let logdir = daemon::ensure_log_dir().unwrap();
+                let logfile = tracing_appender::rolling::daily(logdir, "daemon");
+                let log_collector = tracing_subscriber::fmt().with_writer(logfile).finish();
+                tracing::subscriber::with_default(log_collector, || {
+                    if let Err(i) = fork::setsid() {
+                        tracing::error!("Couldn't setsid in daemon; returned {}", i);
+                        panic!("Couldn't setsid in daemon");
+                    }
+                    if let Err(i) = fork::close_fd() {
+                        tracing::error!("Can't close stdio fds in daemon; returned {}", i);
+                        panic!("Can't close stdio fds in daemon");
+                    }
+                    let listen_saddrs = vec![
+                        SocketAddr::V4(SocketAddrV4::new(LOCALHOST_V4, self.daemon_port)),
+                        SocketAddr::V6(SocketAddrV6::new(LOCALHOST_V6, self.daemon_port, 0, 0))
+                    ];
+                    let listen_address = tiny_http::ConfigListenAddr::IP(listen_saddrs);
+                    tracing::info!("Listening on port {}", self.daemon_port);
+                    match Daemon::new(listen_address) {
+                        Ok(mut d) => {
+                            let r = d.run().map(|_| DaemonError::HTTPServerClosed ).unwrap_or_else(|e| e );
+                            tracing::error!("Daemon encountered error: {}", r);
+                            panic!("Daemon encountered error and stopped:\n{}", r)
+                        },
+                        Err(e) => {
+                            tracing::error!("Couldn't run daemon: {}", e);
+                            panic!("Couldn't create daemon: {}", e)
+                        },
+                    }
+                })
             },
             Err(e) => Err(ClientError::ForkError(e)),
         }
@@ -178,7 +193,7 @@ impl Client {
                         let dproc_query = system.process(pid);
                         if let Some(daemon_process) = dproc_query {
                             if is_process_running_child_daemon(&daemon_process) {
-                                println!("Waiting for daemon...");
+                                tracing::info!("Waiting for daemon...");
                             } else {
                                 return Err(ClientError::DaemonCrashed);
                             }
@@ -186,7 +201,7 @@ impl Client {
                             return Err(ClientError::DaemonCrashed);
                         } 
                     } else {
-                        println!("Spawning daemon process");
+                        tracing::info!("Spawning daemon process");
                         let daemon_pid = usize::try_from(self.spawn_detached_daemon()?).unwrap();
                         spawned_pid = Some(Pid::from(daemon_pid));
                     }
@@ -262,12 +277,12 @@ impl Client {
                 DaemonLoopControl::Continue
             },
             DaemonStatus::AwaitAuthorization(auth_str) => {
-                println!("Waiting for authorization...\n{}", auth_str);
+                tracing::info!("Waiting for authorization...\n{}", auth_str);
                 self.open_url_and_print_err(auth_str);
                 DaemonLoopControl::WaitForChange
             },
             DaemonStatus::AwaitConsent(consent_str) => {
-                println!("Waiting for consent...\n{}", consent_str);
+                tracing::info!("Waiting for consent...\n{}", consent_str);
                 self.open_url_and_print_err(consent_str);
                 DaemonLoopControl::WaitForChange
             },
