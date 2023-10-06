@@ -72,9 +72,10 @@ pub fn state_home() -> XDGDirectoryResult<PathBuf> {
         .map(|ref s| PathBuf::from(s) )
 }
 
-pub fn ensure_state_home_exists() -> XDGDirectoryResult<PathBuf> {
+pub fn ensure_state_home_exists(subdirectory: &str) -> XDGDirectoryResult<PathBuf> {
     let mut cur_path = PathBuf::new();
-    for component in state_home()?.components() {
+    let state_home_subdir = state_home()?.join(subdirectory);
+    for component in state_home_subdir.components() {
         cur_path.push(component);
         if !cur_path.is_dir() {
             std::fs::create_dir(&cur_path)

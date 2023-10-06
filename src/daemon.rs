@@ -15,6 +15,8 @@ const LAUNCHER_TOKEN_URL: &str = "https://account.jagex.com/oauth2/token";
 
 const CONSENT_CLIENT_ID: &str = "1fddee4e-b100-4f4e-b2b0-097f9088f9d2";
 
+pub const DAEMON_STATE_SUBDIR: &str = "osrs-launcher";
+
 #[derive(Debug)]
 pub enum DaemonError {
     HTTPServer(Box<dyn Error + Send + Sync + 'static>),
@@ -621,7 +623,7 @@ impl LauncherClientSession {
 
     const STATE_FILENAME: &'static str = "launcher_session.json";
     pub fn ensure_state_file_path() -> LauncherClientResult<PathBuf> {
-        let xdg_dir = xdg::ensure_state_home_exists()
+        let xdg_dir = xdg::ensure_state_home_exists(DAEMON_STATE_SUBDIR)
             .map_err(LauncherClientError::XDG)?;
         Ok(xdg_dir.join(Self::STATE_FILENAME))
     }
@@ -838,7 +840,7 @@ impl ConsentClientSession {
 
     const STATE_FILENAME: &'static str = "consent_session.json";
     pub fn ensure_state_file_path() -> ConsentClientResult<PathBuf> {
-        let xdg_dir = xdg::ensure_state_home_exists()
+        let xdg_dir = xdg::ensure_state_home_exists(DAEMON_STATE_SUBDIR)
             .map_err(ConsentClientError::XDG)?;
         Ok(xdg_dir.join(Self::STATE_FILENAME))
     }

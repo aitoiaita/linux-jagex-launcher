@@ -3,7 +3,7 @@ use std::{fmt::Display, path::PathBuf, fs::{File, OpenOptions}, io::Write};
 use reqwest::header::{CONTENT_TYPE, HeaderValue, AUTHORIZATION};
 use serde::{Serialize, Deserialize};
 
-use crate::{daemon::{LauncherIDToken, DaemonResult, DaemonError}, xdg::{XDGDirectoryError, self}};
+use crate::{daemon::{LauncherIDToken, DaemonResult, DaemonError, DAEMON_STATE_SUBDIR}, xdg::{XDGDirectoryError, self}};
 
 const GAMESESSION_ACCOUNTS_ENDPOINT: &str = "https://auth.jagex.com/game-session/v1/accounts";
 const GAMESESSION_SESSION_ENDPOINT: &str = "https://auth.jagex.com/game-session/v1/sessions";
@@ -153,7 +153,7 @@ pub enum AccountSession {
 impl AccountSession {
     const STATE_FILENAME: &'static str = "account_session.json";
     pub fn ensure_state_file_path() -> GameSessionResult<PathBuf> {
-        let xdg_dir = xdg::ensure_state_home_exists()
+        let xdg_dir = xdg::ensure_state_home_exists(DAEMON_STATE_SUBDIR)
             .map_err(GameSessionError::XDG)?;
         Ok(xdg_dir.join(Self::STATE_FILENAME))
     }
