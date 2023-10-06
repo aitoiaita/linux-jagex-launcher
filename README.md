@@ -15,7 +15,7 @@ path/to/RuneLite.AppImage
 ```
 and then mark it as executable with `chmod +x ~/.local/bin/runelite`
 ### Build
-Use cargo to build the project
+Use cargo to build the project  
 `cargo build -r`
 ### Install
 Move the built binary to a directory in your PATH  
