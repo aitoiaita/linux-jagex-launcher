@@ -41,8 +41,9 @@ fn kill_process(pid: usize) -> bool {
 fn main() -> ClientResult<()> {
     // setup logging
     let logfile = tracing_appender::rolling::daily(daemon::ensure_log_dir().unwrap(), "client");
-    tracing_subscriber::fmt().with_writer(logfile.and(std::io::stdout)).with_level(true).init();
+    tracing_subscriber::fmt().with_writer(logfile.and(std::io::stdout)).init();
 
+    tracing::info!("launching");
     if let Some(jagex_params) = std::env::args().nth(1).and_then(|s| s.strip_prefix("jagex:").map(|s| s.to_string() ) ) {
         // handle authorization callback invokation
 
