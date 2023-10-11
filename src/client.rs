@@ -1,11 +1,14 @@
-use std::{fmt::Display, net::{SocketAddrV4, SocketAddr, SocketAddrV6}, time::Duration, io::{stdout, Write}};
+use std::{fmt::Display, net::{SocketAddrV4, SocketAddr, SocketAddrV6, Ipv4Addr, Ipv6Addr}, time::Duration, io::{stdout, Write}};
 
 use fork::Fork;
 use oauth2::{AuthorizationCode, CsrfToken};
 use sysinfo::{SystemExt, System, Pid, ProcessExt, Process, PidExt, ProcessStatus};
 use url::Url;
 
-use crate::{daemon::{DaemonRequest, DaemonResponse, DaemonStatus, Daemon, DaemonError, self}, xdg, LOCALHOST_V4, LOCALHOST_V6};
+use crate::{daemon::{DaemonRequest, DaemonResponse, DaemonStatus, Daemon, DaemonError, self}, xdg};
+
+const LOCALHOST_V4: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 1);
+const LOCALHOST_V6: Ipv6Addr = Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1);
 
 #[derive(Debug)]
 pub enum ClientError {

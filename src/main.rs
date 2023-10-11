@@ -1,19 +1,14 @@
-use std::net::{Ipv4Addr, Ipv6Addr};
-
 use clap::Parser;
 use client::{Client, ClientResult};
-use daemon::{DaemonStatus, LauncherClientSession, ConsentClientSession};
+use daemon::DaemonStatus;
 use sysinfo::{System, SystemExt, Pid, ProcessExt};
 use tracing_subscriber::fmt::writer::MakeWriterExt;
 
+use crate::{daemon::{launcher_client::LauncherClientSession, consent_client::ConsentClientSession}, xdg::XDGCredsState};
+
 mod daemon;
-mod jagex_oauth;
-mod game_session;
 mod xdg;
 mod client;
-
-const LOCALHOST_V4: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 1);
-const LOCALHOST_V6: Ipv6Addr = Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1);
 
 const DEFAULT_DAEMON_PORT: u16 = 80;
 
@@ -70,13 +65,13 @@ fn main() -> ClientResult<()> {
         let client = Client::new(args.daemon_port);
 
         if args.clear_creds {
-            if let Ok(path) = LauncherClientSession::ensure_state_file_path() {
+            if let Ok(path) = LauncherClientSession::ensure_creds_file_path(){
                 if path.exists() {
                     std::fs::remove_file(path).expect("Couldn't remove launcher client credentials file");
                     tracing::info!("Cleared launcher client credentials");
                 }
             }
-            if let Ok(path) = ConsentClientSession::ensure_state_file_path() {
+            if let Ok(path) = ConsentClientSession::ensure_creds_file_path() {
                 if path.exists() {
                     std::fs::remove_file(path).expect("Couldn't remove consent client credentials file");
                     tracing::info!("Cleared consent client credentials");

@@ -1,9 +1,9 @@
-use std::{fmt::Display, path::PathBuf, fs::{File, OpenOptions}, io::Write};
+use std::fmt::Display;
 
 use reqwest::header::{CONTENT_TYPE, HeaderValue, AUTHORIZATION};
 use serde::{Serialize, Deserialize};
 
-use crate::{daemon::{LauncherIDToken, DaemonResult, DaemonError, DAEMON_STATE_SUBDIR}, xdg::{XDGDirectoryError, self}};
+use crate::{daemon::LauncherIDToken, xdg::{XDGCredsState, XDGCredsStateError}, trans_tuple_struct};
 
 const GAMESESSION_ACCOUNTS_ENDPOINT: &str = "https://auth.jagex.com/game-session/v1/accounts";
 const GAMESESSION_SESSION_ENDPOINT: &str = "https://auth.jagex.com/game-session/v1/sessions";
@@ -15,13 +15,15 @@ pub enum GameSessionError {
     HTTP(reqwest::Error),
     InvalidHeaderValue(reqwest::header::InvalidHeaderValue),
     URLParse(url::ParseError),
-    SerializeCreds(serde_json::Error),
-    WriteCreds(std::io::Error),
-    XDG(XDGDirectoryError),
-    ReadCreds(std::io::Error),
-    DeserializeCreds(serde_json::Error),
+    CredsState(XDGCredsStateError),
 }
 type GameSessionResult<T> = Result<T, GameSessionError>;
+
+impl From<XDGCredsStateError> for GameSessionError {
+    fn from(e: XDGCredsStateError) -> Self {
+        GameSessionError::CredsState(e)
+    }
+}
 
 impl From<serde_json::Error> for GameSessionError {
     fn from(e: serde_json::Error) -> Self {
@@ -54,11 +56,7 @@ impl Display for GameSessionError {
             GameSessionError::HTTP(e) => write!(f, "HTTP error: {}", e),
             GameSessionError::InvalidHeaderValue(e) => write!(f, "{}", e),
             GameSessionError::URLParse(e) => write!(f, "Error parsing URL: {}", e),
-            GameSessionError::SerializeCreds(e) => write!(f, "Couldn't serialize credentials: {}", e),
-            GameSessionError::WriteCreds(e) => write!(f, "Couldn't save credentials: {}", e),
-            GameSessionError::XDG(e) => write!(f, "XDG environment error: {}", e),
-            GameSessionError::ReadCreds(e) => write!(f, "Couldn't read saved credentials: {}", e),
-            GameSessionError::DeserializeCreds(e) => write!(f, "Couldn't deserialize saved credentials: {}", e),
+            GameSessionError::CredsState(e) => write!(f, "Saved credential error: {}", e),
         }
     }
 }
@@ -67,6 +65,12 @@ impl Display for GameSessionError {
 pub struct RSProfileResponse {
     pub display_name_set: bool,
     pub display_name: Option<String>,
+}
+
+impl RSProfileResponse {
+    pub fn get_display_name<'a>(&'a self) -> &'a Option<String> {
+        &self.display_name
+    }
 }
 
 pub fn fetch_game_profile(id_token: &LauncherIDToken) -> GameSessionResult<RSProfileResponse> {
@@ -78,8 +82,7 @@ pub fn fetch_game_profile(id_token: &LauncherIDToken) -> GameSessionResult<RSPro
     Ok(profile)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionID(pub String);
+trans_tuple_struct!(pub SessionID(String), derive(Debug, Clone, Serialize, Deserialize));
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct GameSessionID {
@@ -99,28 +102,42 @@ struct GameSessionRequest {
     id_token: LauncherIDToken
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-pub struct AccountID(pub String);
-#[derive(Clone, Serialize, Deserialize)]
-pub struct DisplayName(pub String);
+trans_tuple_struct!(pub AccountID(String), derive(Clone, Serialize, Deserialize));
+trans_tuple_struct!(pub DisplayName(String), derive(Clone, Serialize, Deserialize));
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct GameSessionAccount {
     #[serde(rename = "accountId")]
-    pub account_id: AccountID,
+    account_id: AccountID,
     #[serde(rename = "displayName")]
-    pub display_name: DisplayName
+    display_name: DisplayName
+}
+
+impl GameSessionAccount {
+    pub fn get_display_name<'a>(&'a self) -> &'a DisplayName {
+        &self.display_name
+    }
+
+    pub fn get_account_id<'a>(&'a self) -> &'a AccountID {
+        &self.account_id
+    }
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct GameSession {
-    pub session_id: GameSessionID,
-    pub accounts: Vec<GameSessionAccount>,
+    session_id: GameSessionID,
+    accounts: Vec<GameSessionAccount>,
 }
 
 impl GameSession {
     fn new(session_id: GameSessionID, accounts: Vec<GameSessionAccount>) -> Self {
         GameSession { session_id, accounts }
+    }
+}
+
+impl Into<AccountSession> for GameSession {
+    fn into(self) -> AccountSession {
+        AccountSession::Jagex { session_id: self.session_id, accounts: self.accounts }
     }
 }
 
@@ -150,55 +167,17 @@ pub enum AccountSession {
     Jagex { session_id: GameSessionID, accounts: Vec<GameSessionAccount> },
 }
 
-impl AccountSession {
-    const STATE_FILENAME: &'static str = "account_session.json";
-    pub fn ensure_state_file_path() -> GameSessionResult<PathBuf> {
-        let xdg_dir = xdg::ensure_state_home_exists(DAEMON_STATE_SUBDIR)
-            .map_err(GameSessionError::XDG)?;
-        Ok(xdg_dir.join(Self::STATE_FILENAME))
-    }
-
-    pub fn from_state_file() -> GameSessionResult<Option<Self>> {
-        let creds_path = Self::ensure_state_file_path()?;
-        let creds_file = match File::open(creds_path) {
-            Ok(f) => f,
-            Err(e) => {
-                if let std::io::ErrorKind::NotFound = e.kind() {
-                    return Ok(None);
-                } else {
-                    return Err(GameSessionError::ReadCreds(e));
-                }
-            }
-        };
-        let creds_data: Option<Self> = serde_json::from_reader(creds_file)
-            .map_err(GameSessionError::DeserializeCreds)?;
-        Ok(creds_data)
-    }
-
-    pub fn write_state_file(&self) -> GameSessionResult<()> {
-        let file_path = Self::ensure_state_file_path()?;
-        let file_exists = file_path.exists();
-        let mut file = OpenOptions::new()
-            .create_new(!file_exists)
-            .write(true)
-            .open(file_path)
-            .map_err(GameSessionError::WriteCreds)?;
-        let data = serde_json::to_string(&Some(&self))
-            .map_err(GameSessionError::SerializeCreds)?;
-        file.write_all(data.as_bytes())
-            .map_err(GameSessionError::WriteCreds)?;
-        Ok(())
-    }
+impl XDGCredsState for AccountSession {
+    const CREDS_FILENAME: &'static str = "account_session.json";
 }
 
 pub struct GameSessionClient {
-    pub session: Option<AccountSession>,
+    session: Option<AccountSession>,
 }
 
 impl GameSessionClient {
-    pub fn new() -> DaemonResult<Self> {
-        let session = AccountSession::from_state_file()
-            .map_err(DaemonError::GameSessionClient)?;
+    pub fn new() -> GameSessionResult<Self> {
+        let session = AccountSession::from_state_file()?;
         Ok(GameSessionClient { session })
     }
 
@@ -206,5 +185,9 @@ impl GameSessionClient {
         session.write_state_file()?;
         self.session = Some(session);
         Ok(self.session.as_ref().unwrap())
+    }
+
+    pub fn get_session<'a>(&'a self) -> &'a Option<AccountSession> {
+        &self.session
     }
 }
