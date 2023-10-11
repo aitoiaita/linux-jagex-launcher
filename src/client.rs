@@ -8,11 +8,6 @@ use url::Url;
 use crate::{daemon::{DaemonRequest, DaemonResponse, DaemonStatus, Daemon, DaemonError, self}, xdg, LOCALHOST_V4, LOCALHOST_V6};
 
 #[derive(Debug)]
-pub enum ClientAuthorizeError {
-    
-}
-
-#[derive(Debug)]
 pub enum ClientError {
     PrepareRequest(reqwest::Error),
     ExecuteRequest(reqwest::Error),
@@ -39,7 +34,7 @@ impl Display for ClientError {
             ClientError::AuthURIMissingState => write!(f, "Authorization URI was missing state param"),
             ClientError::AuthURIMissingIntent => write!(f, "Authorization URI was missing intent param"),
             ClientError::AuthURIIntentInvalid(s) => write!(f, "Authorization URI intent param was an invalid value: {}", s),
-            ClientError::DaemonCrashed => write!(f, "Spawned daemon, but then it crashed. Check daemon logs."), // << TODO: daemon logs
+            ClientError::DaemonCrashed => write!(f, "Spawned daemon, but then it crashed. Check daemon logs."),
         }
     }
 }
