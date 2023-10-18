@@ -4,7 +4,7 @@ use daemon::DaemonStatus;
 use sysinfo::{System, SystemExt, Pid, ProcessExt};
 use tracing_subscriber::fmt::writer::MakeWriterExt;
 
-use crate::{daemon::{launcher_client::LauncherClientSession, consent_client::ConsentClientSession}, xdg::XDGCredsState};
+use crate::{daemon::{launcher_client::LauncherClientSession, consent_client::ConsentClientSession, game_session::AccountSession}, xdg::XDGCredsState};
 
 mod daemon;
 mod xdg;
@@ -75,6 +75,12 @@ fn main() -> ClientResult<()> {
                 if path.exists() {
                     std::fs::remove_file(path).expect("Couldn't remove consent client credentials file");
                     tracing::info!("Cleared consent client credentials");
+                }
+            }
+            if let Ok(path) = AccountSession::ensure_creds_file_path() {
+                if path.exists() {
+                    std::fs::remove_file(path).expect("Couldn't remove account session credentials file");
+                    tracing::info!("Cleared account session credentials");
                 }
             }
             tracing::info!("Done clearing credentials");
