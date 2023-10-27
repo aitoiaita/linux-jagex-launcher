@@ -223,11 +223,13 @@ impl Client {
         match choices.len() {
             0 => {
                 println!("Press enter to launch");
+                std::io::stdin().lines().next().expect("Failed to read from stdin");
                 self.launch_and_print_result(None);
             },
             1 => {
                 let display_name = choices.get(0).unwrap();
                 println!("Press enter to launch as {}", display_name);
+                std::io::stdin().lines().next().expect("Failed to read from stdin");
                 self.launch_and_print_result(Some(&display_name));
             },
             _ => {
