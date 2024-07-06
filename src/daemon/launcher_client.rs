@@ -1,6 +1,6 @@
 use std::{time::SystemTime, fmt::Display};
 
-use oauth2::{AuthorizationCode, CsrfToken, AccessToken, RefreshToken, EmptyExtraTokenFields, basic::{BasicTokenType, BasicErrorResponseType}, RequestTokenError, StandardErrorResponse, TokenResponse, reqwest::http_client, Scope};
+use oauth2::{AuthorizationCode, CsrfToken, RedirectUrl, AccessToken, RefreshToken, EmptyExtraTokenFields, basic::{BasicTokenType, BasicErrorResponseType}, RequestTokenError, StandardErrorResponse, TokenResponse, reqwest::http_client, Scope};
 use serde::{Serialize, Deserialize};
 use url::Url;
 
@@ -11,6 +11,7 @@ use super::{jagex_oauth::{IDToken, JagexClient, TokenResponseWithJWT}, OSRSLogin
 const LAUNCHER_CLIENT_ID: &str = "com_jagex_auth_desktop_launcher";
 pub const LAUNCHER_AUTH_URL: &str = "https://account.jagex.com/oauth2/auth";
 pub const LAUNCHER_TOKEN_URL: &str = "https://account.jagex.com/oauth2/token";
+const LAUNCHER_REDIRECT_URI: &str = "https://secure.runescape.com/m=weblogin/launcher-redirect";
 
 #[derive(Debug)]
 pub enum LauncherClientError {
@@ -203,7 +204,8 @@ impl LauncherClient {
             return Err(LauncherClientError::UnknownState);
         }
 
-        let request = self.oauth.exchange_code(code.0);
+        let request = self.oauth.exchange_code(code.0)
+            .set_redirect_uri(std::borrow::Cow::Owned(RedirectUrl::new(LAUNCHER_REDIRECT_URI.to_string()).unwrap()));
         let response = request.request(http_client)
             .map_err(|e| LauncherClientError::RequestToken(e) )?;
 
@@ -215,7 +217,8 @@ impl LauncherClient {
             .add_scope(Scope::new("openid".to_string()))
             .add_scope(Scope::new("offline".to_string()))
             .add_scope(Scope::new("gamesso.token.create".to_string()))
-            .add_scope(Scope::new("user.profile.read".to_string()));
+            .add_scope(Scope::new("user.profile.read".to_string()))
+            .set_redirect_uri(std::borrow::Cow::Owned(RedirectUrl::new(LAUNCHER_REDIRECT_URI.to_string()).unwrap()));
         let (url, csrf_token) = auth_request.url();
         let url_str = url.to_string();
         self.session.set_saved_auth_url(url)?;
