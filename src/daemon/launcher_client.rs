@@ -1,6 +1,6 @@
 use std::{time::SystemTime, fmt::Display};
 
-use oauth2::{AuthorizationCode, CsrfToken, RedirectUrl, AccessToken, RefreshToken, EmptyExtraTokenFields, basic::{BasicTokenType, BasicErrorResponseType}, RequestTokenError, StandardErrorResponse, TokenResponse, reqwest::http_client, Scope};
+use oauth2::{basic::{BasicErrorResponseType, BasicTokenType}, reqwest::http_client, AccessToken, AuthorizationCode, CsrfToken, EmptyExtraTokenFields, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, RefreshToken, RequestTokenError, Scope, StandardErrorResponse, TokenResponse};
 use serde::{Serialize, Deserialize};
 use url::Url;
 
@@ -17,6 +17,7 @@ const LAUNCHER_REDIRECT_URI: &str = "https://secure.runescape.com/m=weblogin/lau
 pub enum LauncherClientError {
     OAuthURL(url::ParseError),
     NotInitialized,
+    PKCEVerifierMissing,
     UnknownState,
     RequestToken(RequestTokenError<oauth2::reqwest::Error<reqwest::Error>, StandardErrorResponse<BasicErrorResponseType>>),
     TokenResponseMissingIDToken,
@@ -31,13 +32,14 @@ impl Display for LauncherClientError {
         match self {
             LauncherClientError::OAuthURL(e) => write!(f, "Couldn't parse OAuth2 url: {}", e),
             LauncherClientError::NotInitialized => write!(f, "Launcher hasn't been initialized"),
+            LauncherClientError::PKCEVerifierMissing => write!(f, "The PKCE verifier is missing"),
             LauncherClientError::UnknownState => write!(f, "Unknown/untracked state"),
             LauncherClientError::RequestToken(e) => write!(f, "Couldn't exchange authorization code for launcher tokens\n{}", match e {
                 RequestTokenError::ServerResponse(e) => format!("Server responded with error: {}", e),
-                RequestTokenError::Request(e) => format!("Couldn't send request: {}", e),
+                    RequestTokenError::Request(e) => format!("Couldn't send request: {}", e),
                 RequestTokenError::Parse(e, bytes) => format!("Couldn't parse server response: {}\n{}", e, String::from_utf8_lossy(bytes)),
-                RequestTokenError::Other(e) => e.to_string(),
-            }),
+                    RequestTokenError::Other(e) => e.to_string(),
+                }),
             LauncherClientError::TokenResponseMissingIDToken => write!(f, "Token exchange response was missing id_token"),
             LauncherClientError::TokenResponseMissingRefreshToken => write!(f, "Token exchange response was missing refresh_token"),
             LauncherClientError::TokenResponseMissingExpiration => write!(f, "Token exchange response was missing expires_in"),
@@ -103,12 +105,13 @@ trans_tuple_struct!(pub LauncherRefreshToken(RefreshToken), derive(Clone, Serial
 pub struct LauncherClient {
     oauth: JagexClient,
     session: LauncherClientSession,
+    pkce_verifier: Option<PkceCodeVerifier>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct LauncherTokens {
     access_token: LauncherAccessToken,
-    refresh_token: LauncherRefreshToken, 
+    refresh_token: LauncherRefreshToken,
     id_token: LauncherIDToken,
     expires_at: SystemTime,
     login_provider: OSRSLoginProvider,
@@ -176,7 +179,7 @@ impl LauncherClient {
         let session = LauncherClientSession::from_state_file()
             .map_err(LauncherClientError::CredsState)?
             .unwrap_or(LauncherClientSession::new());
-        Ok(LauncherClient { oauth, session })
+        Ok(LauncherClient { oauth, session, pkce_verifier: None })
     }
 
     pub fn refreshed_tokens<'a>(&'a mut self) -> LauncherClientResult<&'a LauncherTokens> {
@@ -204,16 +207,30 @@ impl LauncherClient {
             return Err(LauncherClientError::UnknownState);
         }
 
-        let request = self.oauth.exchange_code(code.0)
-            .set_redirect_uri(std::borrow::Cow::Owned(RedirectUrl::new(LAUNCHER_REDIRECT_URI.to_string()).unwrap()));
-        let response = request.request(http_client)
+
+        let pkce_verifier = self.pkce_verifier
+            .take()
+            .ok_or(LauncherClientError::PKCEVerifierMissing)?;
+
+        let request = self.oauth
+            .exchange_code(code.0)
+            .set_redirect_uri(std::borrow::Cow::Owned(RedirectUrl::new(LAUNCHER_REDIRECT_URI.to_string()).unwrap()))
+            .set_pkce_verifier(pkce_verifier);
+
+            let response = request.request(http_client)
             .map_err(|e| LauncherClientError::RequestToken(e) )?;
 
         self.handle_token_response(response)
     }
 
     pub fn register_auth_url(&mut self) -> LauncherClientResult<String> {
-        let auth_request = self.oauth.authorize_url(|| CsrfToken::new_random_len(12))
+        let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256_len(64);
+
+        self.pkce_verifier = Some(pkce_verifier);
+
+        let auth_request = self.oauth
+            .authorize_url(|| CsrfToken::new_random_len(12))
+            .set_pkce_challenge(pkce_challenge)
             .add_scope(Scope::new("openid".to_string()))
             .add_scope(Scope::new("offline".to_string()))
             .add_scope(Scope::new("gamesso.token.create".to_string()))
