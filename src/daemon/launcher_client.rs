@@ -36,9 +36,9 @@ impl Display for LauncherClientError {
             LauncherClientError::UnknownState => write!(f, "Unknown/untracked state"),
             LauncherClientError::RequestToken(e) => write!(f, "Couldn't exchange authorization code for launcher tokens\n{}", match e {
                 RequestTokenError::ServerResponse(e) => format!("Server responded with error: {}", e),
-                    RequestTokenError::Request(e) => format!("Couldn't send request: {}", e),
+                RequestTokenError::Request(e) => format!("Couldn't send request: {}", e),
                 RequestTokenError::Parse(e, bytes) => format!("Couldn't parse server response: {}\n{}", e, String::from_utf8_lossy(bytes)),
-                    RequestTokenError::Other(e) => e.to_string(),
+                RequestTokenError::Other(e) => e.to_string(),
                 }),
             LauncherClientError::TokenResponseMissingIDToken => write!(f, "Token exchange response was missing id_token"),
             LauncherClientError::TokenResponseMissingRefreshToken => write!(f, "Token exchange response was missing refresh_token"),
@@ -217,8 +217,7 @@ impl LauncherClient {
             .set_redirect_uri(std::borrow::Cow::Owned(RedirectUrl::new(LAUNCHER_REDIRECT_URI.to_string()).unwrap()))
             .set_pkce_verifier(pkce_verifier);
 
-            let response = request.request(http_client)
-            .map_err(|e| LauncherClientError::RequestToken(e) )?;
+            let response = request.request(http_client).map_err(|e| LauncherClientError::RequestToken(e) )?;
 
         self.handle_token_response(response)
     }
