@@ -1,13 +1,18 @@
-use std::{time::Duration, collections::BTreeMap, str::FromStr, string::FromUtf8Error, fmt::Display};
-
-use base64::{Engine, DecodeError};
-use chrono::{DateTime, Utc, serde::ts_seconds};
-use oauth2::{
-    ExtraTokenFields, TokenType, AccessToken, RefreshToken, Scope, helpers, TokenResponse, 
-    basic::{BasicTokenType, BasicErrorResponse, BasicTokenIntrospectionResponse, BasicRevocationErrorResponse}, 
-    Client, StandardRevocableToken, EmptyExtraTokenFields
+use std::{
+    collections::BTreeMap, fmt::Display, str::FromStr, string::FromUtf8Error, time::Duration,
 };
-use serde::{Deserialize, Serialize, Serializer, Deserializer};
+
+use base64::{DecodeError, Engine};
+use chrono::{serde::ts_seconds, DateTime, Utc};
+use oauth2::{
+    basic::{
+        BasicErrorResponse, BasicRevocationErrorResponse, BasicTokenIntrospectionResponse,
+        BasicTokenType,
+    },
+    helpers, AccessToken, Client, EmptyExtraTokenFields, ExtraTokenFields, RefreshToken, Scope,
+    StandardRevocableToken, TokenResponse, TokenType,
+};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 pub type JagexClient = Client<
     BasicErrorResponse,
@@ -19,7 +24,11 @@ pub type JagexClient = Client<
 >;
 
 #[derive(Debug)]
-pub enum JWTPart { Header, Claims, Signature }
+pub enum JWTPart {
+    Header,
+    Claims,
+    Signature,
+}
 impl Display for JWTPart {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -44,7 +53,9 @@ impl Display for JWTParseError {
         match self {
             Self::ExtraSegments(n) => write!(f, "{} too many segments", n),
             Self::Missing(part) => write!(f, "Missing {} section", part),
-            Self::Base64Decode(part, e) => write!(f, "Couldn't decode base64 encoded {}: {}", part, e),
+            Self::Base64Decode(part, e) => {
+                write!(f, "Couldn't decode base64 encoded {}: {}", part, e)
+            }
             Self::Utf8Decode(part, e) => write!(f, "Couldn't decode utf8 encoded {}: {}", part, e),
             Self::Parse(part, e) => write!(f, "Couldn't parse {} json: {}", part, e),
         }
@@ -77,7 +88,7 @@ pub struct JWTClaims {
     #[serde(rename = "jti")]
     pub jwt_id: String,
     #[serde(flatten)]
-    pub extra: BTreeMap<String, serde_json::Value>
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Clone, Debug)]
@@ -91,7 +102,8 @@ pub struct IDToken {
 impl Serialize for IDToken {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
-        S: Serializer {
+        S: Serializer,
+    {
         serializer.serialize_str(&self.original)
     }
 }
@@ -99,7 +111,8 @@ impl Serialize for IDToken {
 impl<'de> Deserialize<'de> for IDToken {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
-        D: Deserializer<'de> {
+        D: Deserializer<'de>,
+    {
         let buf = String::deserialize(deserializer)?;
         IDToken::from_str(&buf).map_err(serde::de::Error::custom)
     }
@@ -111,18 +124,21 @@ impl FromStr for IDToken {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let b64_engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
         let mut segments = s.split(".");
-        let header_segment = segments.next()
-            .map(|s| b64_engine.decode(s) )
+        let header_segment = segments
+            .next()
+            .map(|s| b64_engine.decode(s))
             .ok_or(JWTParseError::Missing(JWTPart::Header))?
-            .map_err(|e| JWTParseError::Base64Decode(JWTPart::Header, e) )?;
-        let claims_segment = segments.next()
-            .map(|s| b64_engine.decode(s) )
+            .map_err(|e| JWTParseError::Base64Decode(JWTPart::Header, e))?;
+        let claims_segment = segments
+            .next()
+            .map(|s| b64_engine.decode(s))
             .ok_or(JWTParseError::Missing(JWTPart::Claims))?
-            .map_err(|e| JWTParseError::Base64Decode(JWTPart::Claims, e) )?;
-        let signature_segment = segments.next()
-            .map(|s| b64_engine.decode(s) )
+            .map_err(|e| JWTParseError::Base64Decode(JWTPart::Claims, e))?;
+        let signature_segment = segments
+            .next()
+            .map(|s| b64_engine.decode(s))
             .ok_or(JWTParseError::Missing(JWTPart::Signature))?
-            .map_err(|e| JWTParseError::Base64Decode(JWTPart::Signature, e) )?;
+            .map_err(|e| JWTParseError::Base64Decode(JWTPart::Signature, e))?;
 
         let remaining_segments = segments.count();
         if remaining_segments != 0 {
@@ -130,16 +146,21 @@ impl FromStr for IDToken {
         }
 
         let header_str = String::from_utf8(header_segment)
-            .map_err(|e| JWTParseError::Utf8Decode(JWTPart::Header, e) )?;
+            .map_err(|e| JWTParseError::Utf8Decode(JWTPart::Header, e))?;
         let header: JWTHeader = serde_json::from_str(&header_str)
-            .map_err(|e| JWTParseError::Parse(JWTPart::Header, e) )?;
+            .map_err(|e| JWTParseError::Parse(JWTPart::Header, e))?;
 
         let claims_str = String::from_utf8(claims_segment)
-            .map_err(|e| JWTParseError::Utf8Decode(JWTPart::Claims, e) )?;
+            .map_err(|e| JWTParseError::Utf8Decode(JWTPart::Claims, e))?;
         let claims: JWTClaims = serde_json::from_str(&claims_str)
-            .map_err(|e| JWTParseError::Parse(JWTPart::Claims, e) )?;
+            .map_err(|e| JWTParseError::Parse(JWTPart::Claims, e))?;
 
-        Ok(IDToken { header, claims, signature: signature_segment, original: s.to_string() })
+        Ok(IDToken {
+            header,
+            claims,
+            signature: signature_segment,
+            original: s.to_string(),
+        })
     }
 }
 

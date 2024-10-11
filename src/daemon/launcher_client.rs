@@ -1,12 +1,24 @@
-use std::{time::SystemTime, fmt::Display};
+use std::{fmt::Display, time::SystemTime};
 
-use oauth2::{basic::{BasicErrorResponseType, BasicTokenType}, reqwest::http_client, AccessToken, AuthorizationCode, CsrfToken, EmptyExtraTokenFields, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, RefreshToken, RequestTokenError, Scope, StandardErrorResponse, TokenResponse};
-use serde::{Serialize, Deserialize};
+use oauth2::{
+    basic::{BasicErrorResponseType, BasicTokenType},
+    reqwest::http_client,
+    AccessToken, AuthorizationCode, CsrfToken, EmptyExtraTokenFields, PkceCodeChallenge,
+    PkceCodeVerifier, RedirectUrl, RefreshToken, RequestTokenError, Scope, StandardErrorResponse,
+    TokenResponse,
+};
+use serde::{Deserialize, Serialize};
 use url::Url;
 
-use crate::{trans_tuple_struct, xdg::{XDGCredsState, XDGCredsStateResult, XDGCredsStateError}};
+use crate::{
+    trans_tuple_struct,
+    xdg::{XDGCredsState, XDGCredsStateError, XDGCredsStateResult},
+};
 
-use super::{jagex_oauth::{IDToken, JagexClient, TokenResponseWithJWT}, OSRSLoginProvider, load_oauth_client};
+use super::{
+    jagex_oauth::{IDToken, JagexClient, TokenResponseWithJWT},
+    load_oauth_client, OSRSLoginProvider,
+};
 
 const LAUNCHER_CLIENT_ID: &str = "com_jagex_auth_desktop_launcher";
 pub const LAUNCHER_AUTH_URL: &str = "https://account.jagex.com/oauth2/auth";
@@ -19,7 +31,12 @@ pub enum LauncherClientError {
     NotInitialized,
     PKCEVerifierMissing,
     UnknownState,
-    RequestToken(RequestTokenError<oauth2::reqwest::Error<reqwest::Error>, StandardErrorResponse<BasicErrorResponseType>>),
+    RequestToken(
+        RequestTokenError<
+            oauth2::reqwest::Error<reqwest::Error>,
+            StandardErrorResponse<BasicErrorResponseType>,
+        >,
+    ),
     TokenResponseMissingIDToken,
     TokenResponseMissingRefreshToken,
     TokenResponseMissingExpiration,
@@ -34,15 +51,30 @@ impl Display for LauncherClientError {
             LauncherClientError::NotInitialized => write!(f, "Launcher hasn't been initialized"),
             LauncherClientError::PKCEVerifierMissing => write!(f, "The PKCE verifier is missing"),
             LauncherClientError::UnknownState => write!(f, "Unknown/untracked state"),
-            LauncherClientError::RequestToken(e) => write!(f, "Couldn't exchange authorization code for launcher tokens\n{}", match e {
-                RequestTokenError::ServerResponse(e) => format!("Server responded with error: {}", e),
-                RequestTokenError::Request(e) => format!("Couldn't send request: {}", e),
-                RequestTokenError::Parse(e, bytes) => format!("Couldn't parse server response: {}\n{}", e, String::from_utf8_lossy(bytes)),
-                RequestTokenError::Other(e) => e.to_string(),
-                }),
-            LauncherClientError::TokenResponseMissingIDToken => write!(f, "Token exchange response was missing id_token"),
-            LauncherClientError::TokenResponseMissingRefreshToken => write!(f, "Token exchange response was missing refresh_token"),
-            LauncherClientError::TokenResponseMissingExpiration => write!(f, "Token exchange response was missing expires_in"),
+            LauncherClientError::RequestToken(e) => write!(
+                f,
+                "Couldn't exchange authorization code for launcher tokens\n{}",
+                match e {
+                    RequestTokenError::ServerResponse(e) =>
+                        format!("Server responded with error: {}", e),
+                    RequestTokenError::Request(e) => format!("Couldn't send request: {}", e),
+                    RequestTokenError::Parse(e, bytes) => format!(
+                        "Couldn't parse server response: {}\n{}",
+                        e,
+                        String::from_utf8_lossy(bytes)
+                    ),
+                    RequestTokenError::Other(e) => e.to_string(),
+                }
+            ),
+            LauncherClientError::TokenResponseMissingIDToken => {
+                write!(f, "Token exchange response was missing id_token")
+            }
+            LauncherClientError::TokenResponseMissingRefreshToken => {
+                write!(f, "Token exchange response was missing refresh_token")
+            }
+            LauncherClientError::TokenResponseMissingExpiration => {
+                write!(f, "Token exchange response was missing expires_in")
+            }
             LauncherClientError::CredsState(e) => write!(f, "Saved credential error: {}", e),
         }
     }
@@ -67,16 +99,26 @@ impl XDGCredsState for LauncherClientSession {
 
 impl LauncherClientSession {
     pub fn new() -> Self {
-        LauncherClientSession { tokens: None, state: None, auth_url: None }
+        LauncherClientSession {
+            tokens: None,
+            state: None,
+            auth_url: None,
+        }
     }
 
-    pub fn set_saved_tokens<'a>(&'a mut self, tokens: LauncherTokens) -> XDGCredsStateResult<&'a LauncherTokens> {
+    pub fn set_saved_tokens<'a>(
+        &'a mut self,
+        tokens: LauncherTokens,
+    ) -> XDGCredsStateResult<&'a LauncherTokens> {
         self.tokens = Some(tokens);
         self.write_state_file()?;
         Ok(self.tokens.as_ref().unwrap())
     }
 
-    pub fn set_saved_state<'a>(&'a mut self, state: LauncherClientState) -> XDGCredsStateResult<&'a LauncherClientState> {
+    pub fn set_saved_state<'a>(
+        &'a mut self,
+        state: LauncherClientState,
+    ) -> XDGCredsStateResult<&'a LauncherClientState> {
         self.state = Some(state);
         self.write_state_file()?;
         Ok(self.state.as_ref().unwrap())
@@ -118,11 +160,15 @@ pub struct LauncherTokens {
 }
 
 impl LauncherTokens {
-    fn from_token_response(response: TokenResponseWithJWT<EmptyExtraTokenFields, BasicTokenType>) -> LauncherClientResult<Self> {
+    fn from_token_response(
+        response: TokenResponseWithJWT<EmptyExtraTokenFields, BasicTokenType>,
+    ) -> LauncherClientResult<Self> {
         let access_token = response.access_token();
-        let id_token = response.id_token()
+        let id_token = response
+            .id_token()
             .ok_or(LauncherClientError::TokenResponseMissingIDToken)?;
-        let refresh_token = response.refresh_token()
+        let refresh_token = response
+            .refresh_token()
             .ok_or(LauncherClientError::TokenResponseMissingRefreshToken)?;
 
         let mut login_provider = OSRSLoginProvider::Jagex;
@@ -132,21 +178,25 @@ impl LauncherTokens {
             }
         }
 
-        let expires_at = response.expires_in().map(|d| SystemTime::now() + d )
+        let expires_at = response
+            .expires_in()
+            .map(|d| SystemTime::now() + d)
             .ok_or(LauncherClientError::TokenResponseMissingExpiration)?;
 
         let tokens = LauncherTokens {
             access_token: (*access_token).clone().into(),
             refresh_token: (*refresh_token).clone().into(),
             id_token: (*id_token).clone().into(),
-            expires_at, login_provider
+            expires_at,
+            login_provider,
         };
         Ok(tokens)
     }
 
     fn refreshed(&self, client: &JagexClient) -> LauncherClientResult<Self> {
         let request = client.exchange_refresh_token(&self.refresh_token);
-        let response = request.request(http_client)
+        let response = request
+            .request(http_client)
             .map_err(LauncherClientError::RequestToken)?;
         LauncherTokens::from_token_response(response)
     }
@@ -174,50 +224,80 @@ impl LauncherTokens {
 
 impl LauncherClient {
     pub fn new() -> LauncherClientResult<Self> {
-        let oauth = load_oauth_client(LAUNCHER_CLIENT_ID, None, LAUNCHER_AUTH_URL, Some(LAUNCHER_TOKEN_URL))
-            .map_err(|e| LauncherClientError::OAuthURL(e))?;
+        let oauth = load_oauth_client(
+            LAUNCHER_CLIENT_ID,
+            None,
+            LAUNCHER_AUTH_URL,
+            Some(LAUNCHER_TOKEN_URL),
+        )
+        .map_err(|e| LauncherClientError::OAuthURL(e))?;
         let session = LauncherClientSession::from_state_file()
             .map_err(LauncherClientError::CredsState)?
             .unwrap_or(LauncherClientSession::new());
-        Ok(LauncherClient { oauth, session, pkce_verifier: None })
+        Ok(LauncherClient {
+            oauth,
+            session,
+            pkce_verifier: None,
+        })
     }
 
     pub fn refreshed_tokens<'a>(&'a mut self) -> LauncherClientResult<&'a LauncherTokens> {
         let tokens = match self.session.tokens.as_ref() {
             Some(t) => t,
-            None => return Err(LauncherClientError::NotInitialized)
+            None => return Err(LauncherClientError::NotInitialized),
         };
         let tokens = tokens.clone();
         if tokens.expired() {
             tracing::info!("refreshed expired tokens");
-            Ok(self.session.set_saved_tokens(tokens.refreshed(&self.oauth)?)?)
+            Ok(self
+                .session
+                .set_saved_tokens(tokens.refreshed(&self.oauth)?)?)
         } else {
             Ok(self.session.tokens.as_ref().unwrap())
         }
     }
 
-    fn handle_token_response<'a>(&'a mut self, response: TokenResponseWithJWT<EmptyExtraTokenFields, BasicTokenType>) -> LauncherClientResult<&'a LauncherTokens> {
-        Ok(self.session.set_saved_tokens(LauncherTokens::from_token_response(response)?)?)
+    fn handle_token_response<'a>(
+        &'a mut self,
+        response: TokenResponseWithJWT<EmptyExtraTokenFields, BasicTokenType>,
+    ) -> LauncherClientResult<&'a LauncherTokens> {
+        Ok(self
+            .session
+            .set_saved_tokens(LauncherTokens::from_token_response(response)?)?)
     }
 
-    pub fn authorize<'a>(&'a mut self, code: LauncherAuthorizationCode, state: LauncherClientState, _intent: String) -> LauncherClientResult<&'a LauncherTokens> {
+    pub fn authorize<'a>(
+        &'a mut self,
+        code: LauncherAuthorizationCode,
+        state: LauncherClientState,
+        _intent: String,
+    ) -> LauncherClientResult<&'a LauncherTokens> {
         // return error not initialized if state hasn't been set. also return error if unexpected state.
-        let stored_state = self.session.state.as_ref().ok_or(LauncherClientError::NotInitialized)?;
+        let stored_state = self
+            .session
+            .state
+            .as_ref()
+            .ok_or(LauncherClientError::NotInitialized)?;
         if stored_state.secret() != state.secret() {
             return Err(LauncherClientError::UnknownState);
         }
 
-
-        let pkce_verifier = self.pkce_verifier
+        let pkce_verifier = self
+            .pkce_verifier
             .take()
             .ok_or(LauncherClientError::PKCEVerifierMissing)?;
 
-        let request = self.oauth
+        let request = self
+            .oauth
             .exchange_code(code.0)
-            .set_redirect_uri(std::borrow::Cow::Owned(RedirectUrl::new(LAUNCHER_REDIRECT_URI.to_string()).unwrap()))
+            .set_redirect_uri(std::borrow::Cow::Owned(
+                RedirectUrl::new(LAUNCHER_REDIRECT_URI.to_string()).unwrap(),
+            ))
             .set_pkce_verifier(pkce_verifier);
 
-            let response = request.request(http_client).map_err(|e| LauncherClientError::RequestToken(e) )?;
+        let response = request
+            .request(http_client)
+            .map_err(|e| LauncherClientError::RequestToken(e))?;
 
         self.handle_token_response(response)
     }
@@ -227,14 +307,17 @@ impl LauncherClient {
 
         self.pkce_verifier = Some(pkce_verifier);
 
-        let auth_request = self.oauth
+        let auth_request = self
+            .oauth
             .authorize_url(|| CsrfToken::new_random_len(12))
             .set_pkce_challenge(pkce_challenge)
             .add_scope(Scope::new("openid".to_string()))
             .add_scope(Scope::new("offline".to_string()))
             .add_scope(Scope::new("gamesso.token.create".to_string()))
             .add_scope(Scope::new("user.profile.read".to_string()))
-            .set_redirect_uri(std::borrow::Cow::Owned(RedirectUrl::new(LAUNCHER_REDIRECT_URI.to_string()).unwrap()));
+            .set_redirect_uri(std::borrow::Cow::Owned(
+                RedirectUrl::new(LAUNCHER_REDIRECT_URI.to_string()).unwrap(),
+            ));
         let (url, csrf_token) = auth_request.url();
         let url_str = url.to_string();
         self.session.set_saved_auth_url(url)?;

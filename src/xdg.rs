@@ -1,13 +1,20 @@
-use std::{env::{self, VarError}, process::{Child, Command}, fmt::Display, path::PathBuf, fs::{File, OpenOptions}, io::Write};
+use std::{
+    env::{self, VarError},
+    fmt::Display,
+    fs::{File, OpenOptions},
+    io::Write,
+    path::PathBuf,
+    process::{Child, Command},
+};
 
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{de::DeserializeOwned, Serialize};
 use url::Url;
 
 use crate::daemon::DAEMON_STATE_SUBDIR;
 
 pub enum UrlOpenerError {
     IO(std::io::Error),
-    SchemeIsntHttp
+    SchemeIsntHttp,
 }
 pub type UrlOpenerResult<T> = Result<T, UrlOpenerError>;
 
@@ -43,21 +50,23 @@ pub type XDGDirectoryResult<T> = Result<T, XDGDirectoryError>;
 impl Display for XDGDirectoryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            XDGDirectoryError::EnvVar(s, e) => write!(f, "Couldn't access env var \"{}\": {}", s, e),
+            XDGDirectoryError::EnvVar(s, e) => {
+                write!(f, "Couldn't access env var \"{}\": {}", s, e)
+            }
             XDGDirectoryError::CreateDir(e) => write!(f, "Couldn't create XDG directory: {}", e),
         }
     }
 }
 
 pub fn home_env_var() -> XDGDirectoryResult<String> {
-    env::var("HOME").map_err(|e| XDGDirectoryError::EnvVar("HOME", e) )
+    env::var("HOME").map_err(|e| XDGDirectoryError::EnvVar("HOME", e))
 }
 
 const XDG_STATE_HOME: &'static str = "XDG_STATE_HOME";
 pub fn state_home() -> XDGDirectoryResult<PathBuf> {
     env::var(XDG_STATE_HOME)
-        .or_else(|_| home_env_var().map(|home| format!("{}/.local/state", home) ) )
-        .map(|ref s| PathBuf::from(s) )
+        .or_else(|_| home_env_var().map(|home| format!("{}/.local/state", home)))
+        .map(|ref s| PathBuf::from(s))
 }
 
 pub fn ensure_state_home_exists(subdirectory: &str) -> XDGDirectoryResult<PathBuf> {
@@ -66,8 +75,7 @@ pub fn ensure_state_home_exists(subdirectory: &str) -> XDGDirectoryResult<PathBu
     for component in state_home_subdir.components() {
         cur_path.push(component);
         if !cur_path.is_dir() {
-            std::fs::create_dir(&cur_path)
-                .map_err(XDGDirectoryError::CreateDir)?;
+            std::fs::create_dir(&cur_path).map_err(XDGDirectoryError::CreateDir)?;
         }
     }
     Ok(cur_path)
@@ -76,8 +84,11 @@ pub fn ensure_state_home_exists(subdirectory: &str) -> XDGDirectoryResult<PathBu
 #[derive(Debug)]
 pub enum XDGCredsStateError {
     XDG(XDGDirectoryError),
-    Open(std::io::Error), Write(std::io::Error), Read(std::io::Error),
-    Serialize(serde_json::Error), Deserialize(serde_json::Error),
+    Open(std::io::Error),
+    Write(std::io::Error),
+    Read(std::io::Error),
+    Serialize(serde_json::Error),
+    Deserialize(serde_json::Error),
 }
 pub type XDGCredsStateResult<T> = Result<T, XDGCredsStateError>;
 
@@ -89,19 +100,23 @@ impl Display for XDGCredsStateError {
             XDGCredsStateError::Write(e) => write!(f, "Couldn't write state file: {}", e),
             XDGCredsStateError::Read(e) => write!(f, "Couldn't read state file: {}", e),
             XDGCredsStateError::Serialize(e) => write!(f, "Couldn't serialize state file: {}", e),
-            XDGCredsStateError::Deserialize(e) => write!(f, "Couldn't deserialize state file: {}", e),
+            XDGCredsStateError::Deserialize(e) => {
+                write!(f, "Couldn't deserialize state file: {}", e)
+            }
         }
     }
 }
 
 pub trait XDGCredsState
-where Self: Serialize + DeserializeOwned {
+where
+    Self: Serialize + DeserializeOwned,
+{
     const CREDS_FILENAME: &'static str;
     const STATE_SUBDIR: &'static str = DAEMON_STATE_SUBDIR;
 
     fn ensure_creds_file_path() -> XDGCredsStateResult<PathBuf> {
         ensure_state_home_exists(Self::STATE_SUBDIR)
-            .map(|p| p.join(Self::CREDS_FILENAME) )
+            .map(|p| p.join(Self::CREDS_FILENAME))
             .map_err(XDGCredsStateError::XDG)
     }
 
@@ -117,8 +132,8 @@ where Self: Serialize + DeserializeOwned {
                 }
             }
         };
-        let creds_data: Option<Self> = serde_json::from_reader(creds_file)
-            .map_err(XDGCredsStateError::Deserialize)?;
+        let creds_data: Option<Self> =
+            serde_json::from_reader(creds_file).map_err(XDGCredsStateError::Deserialize)?;
         Ok(creds_data)
     }
 
@@ -131,6 +146,7 @@ where Self: Serialize + DeserializeOwned {
             .open(file_path)
             .map_err(XDGCredsStateError::Open)?;
         let data = serde_json::to_string(&Some(self)).map_err(XDGCredsStateError::Serialize)?;
-        file.write_all(data.as_bytes()).map_err(XDGCredsStateError::Write)
+        file.write_all(data.as_bytes())
+            .map_err(XDGCredsStateError::Write)
     }
 }

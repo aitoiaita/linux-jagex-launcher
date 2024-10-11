@@ -1,9 +1,13 @@
-use std::{ fmt::Display, sync::LazyLock };
+use std::{fmt::Display, sync::LazyLock};
 
-use reqwest::header::{CONTENT_TYPE, HeaderValue, AUTHORIZATION};
-use serde::{Serialize, Deserialize};
+use reqwest::header::{HeaderValue, AUTHORIZATION, CONTENT_TYPE};
+use serde::{Deserialize, Serialize};
 
-use crate::{daemon::LauncherIDToken, xdg::{XDGCredsState, XDGCredsStateError}, trans_tuple_struct};
+use crate::{
+    daemon::LauncherIDToken,
+    trans_tuple_struct,
+    xdg::{XDGCredsState, XDGCredsStateError},
+};
 
 const GAMESESSION_ACCOUNTS_ENDPOINT: &str = "https://auth.jagex.com/game-session/v1/accounts";
 const GAMESESSION_SESSION_ENDPOINT: &str = "https://auth.jagex.com/game-session/v1/sessions";
@@ -75,7 +79,8 @@ impl RSProfileResponse {
 
 pub fn fetch_game_profile(id_token: &LauncherIDToken) -> GameSessionResult<RSProfileResponse> {
     let http_client = reqwest::blocking::Client::new();
-    let request = http_client.get(RS_PROFILE_ENDPOINT)
+    let request = http_client
+        .get(RS_PROFILE_ENDPOINT)
         .header(AUTHORIZATION, format!("Bearer {}", id_token.original));
     let response = request.send()?.text().unwrap();
     let profile = serde_json::from_str(&response)?;
@@ -87,7 +92,7 @@ trans_tuple_struct!(pub SessionID(String), derive(Debug, Clone, Serialize, Deser
 #[derive(Clone, Serialize, Deserialize)]
 pub struct GameSessionID {
     #[serde(rename = "sessionId")]
-    session_id: SessionID
+    session_id: SessionID,
 }
 
 impl GameSessionID {
@@ -99,7 +104,7 @@ impl GameSessionID {
 #[derive(Debug, Serialize, Deserialize)]
 struct GameSessionRequest {
     #[serde(rename = "idToken")]
-    id_token: LauncherIDToken
+    id_token: LauncherIDToken,
 }
 
 trans_tuple_struct!(pub AccountID(String), derive(Clone, Serialize, Deserialize));
@@ -112,14 +117,13 @@ pub struct GameSessionAccount {
     #[serde(rename = "displayName", default)]
     display_name: Option<DisplayName>,
     #[serde(rename = "userHash")]
-    user_hash: String
+    user_hash: String,
 }
 
 impl GameSessionAccount {
     pub fn get_display_name<'a>(&'a self) -> &'a DisplayName {
-        static UNKNOWN_DISPLAY_NAME: LazyLock<DisplayName> = LazyLock::new(||
-            DisplayName("Unknown".to_string())
-        );
+        static UNKNOWN_DISPLAY_NAME: LazyLock<DisplayName> =
+            LazyLock::new(|| DisplayName("Unknown".to_string()));
 
         self.display_name.as_ref().unwrap_or(&UNKNOWN_DISPLAY_NAME)
     }
@@ -141,29 +145,40 @@ pub struct GameSession {
 
 impl GameSession {
     fn new(session_id: GameSessionID, accounts: Vec<GameSessionAccount>) -> Self {
-        GameSession { session_id, accounts }
+        GameSession {
+            session_id,
+            accounts,
+        }
     }
 }
 
 impl Into<AccountSession> for GameSession {
     fn into(self) -> AccountSession {
-        AccountSession::Jagex { session_id: self.session_id, accounts: self.accounts }
+        AccountSession::Jagex {
+            session_id: self.session_id,
+            accounts: self.accounts,
+        }
     }
 }
 
 pub fn fetch_game_session(id_token: &LauncherIDToken) -> GameSessionResult<GameSession> {
     let http_client = reqwest::blocking::Client::new();
 
-    let session_request_body = serde_json::to_string(&GameSessionRequest { id_token: id_token.clone() })?;
-    let session_request = http_client.post(GAMESESSION_SESSION_ENDPOINT)
+    let session_request_body = serde_json::to_string(&GameSessionRequest {
+        id_token: id_token.clone(),
+    })?;
+    let session_request = http_client
+        .post(GAMESESSION_SESSION_ENDPOINT)
         .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
         .body(session_request_body);
 
     let session_id_response = session_request.send()?.text().unwrap();
     let session_id: GameSessionID = serde_json::from_str(&session_id_response)?;
 
-    let accounts_request = http_client.get(GAMESESSION_ACCOUNTS_ENDPOINT)
-        .header(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {}", session_id.session_id().0))?);
+    let accounts_request = http_client.get(GAMESESSION_ACCOUNTS_ENDPOINT).header(
+        AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {}", session_id.session_id().0))?,
+    );
     let accounts_response = accounts_request.send()?;
     let accounts = accounts_response.json()?;
 
@@ -173,8 +188,13 @@ pub fn fetch_game_session(id_token: &LauncherIDToken) -> GameSessionResult<GameS
 
 #[derive(Serialize, Deserialize)]
 pub enum AccountSession {
-    Runescape { profile: RSProfileResponse },
-    Jagex { session_id: GameSessionID, accounts: Vec<GameSessionAccount> },
+    Runescape {
+        profile: RSProfileResponse,
+    },
+    Jagex {
+        session_id: GameSessionID,
+        accounts: Vec<GameSessionAccount>,
+    },
 }
 
 impl XDGCredsState for AccountSession {
@@ -191,7 +211,10 @@ impl GameSessionClient {
         Ok(GameSessionClient { session })
     }
 
-    pub fn set_saved_session<'a>(&'a mut self, session: AccountSession) -> GameSessionResult<&'a AccountSession> {
+    pub fn set_saved_session<'a>(
+        &'a mut self,
+        session: AccountSession,
+    ) -> GameSessionResult<&'a AccountSession> {
         session.write_state_file()?;
         self.session = Some(session);
         Ok(self.session.as_ref().unwrap())
