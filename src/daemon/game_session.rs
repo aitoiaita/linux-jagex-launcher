@@ -1,4 +1,4 @@
-use std::fmt::Display;
+use std::{ fmt::Display, sync::LazyLock };
 
 use reqwest::header::{CONTENT_TYPE, HeaderValue, AUTHORIZATION};
 use serde::{Serialize, Deserialize};
@@ -109,17 +109,27 @@ trans_tuple_struct!(pub DisplayName(String), derive(Clone, Serialize, Deserializ
 pub struct GameSessionAccount {
     #[serde(rename = "accountId")]
     account_id: AccountID,
-    #[serde(rename = "displayName")]
-    display_name: DisplayName
+    #[serde(rename = "displayName", default)]
+    display_name: Option<DisplayName>,
+    #[serde(rename = "userHash")]
+    user_hash: String
 }
 
 impl GameSessionAccount {
     pub fn get_display_name<'a>(&'a self) -> &'a DisplayName {
-        &self.display_name
+        static UNKNOWN_DISPLAY_NAME: LazyLock<DisplayName> = LazyLock::new(||
+            DisplayName("Unknown".to_string())
+        );
+
+        self.display_name.as_ref().unwrap_or(&UNKNOWN_DISPLAY_NAME)
     }
 
     pub fn get_account_id<'a>(&'a self) -> &'a AccountID {
         &self.account_id
+    }
+
+    pub fn get_user_hash<'a>(&'a self) -> &'a str {
+        &self.user_hash
     }
 }
 
@@ -151,7 +161,7 @@ pub fn fetch_game_session(id_token: &LauncherIDToken) -> GameSessionResult<GameS
 
     let session_id_response = session_request.send()?.text().unwrap();
     let session_id: GameSessionID = serde_json::from_str(&session_id_response)?;
-    
+
     let accounts_request = http_client.get(GAMESESSION_ACCOUNTS_ENDPOINT)
         .header(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {}", session_id.session_id().0))?);
     let accounts_response = accounts_request.send()?;
